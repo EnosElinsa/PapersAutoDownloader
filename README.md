@@ -26,10 +26,10 @@ pip install -r requirements.txt
 
 这是最稳定的方式，可以复用已登录的浏览器 cookies。
 
-**步骤 1：关闭所有 Chrome，然后用调试模式启动**
+**步骤 1：关闭浏览器，然后用调试模式启动**
 
 <details>
-<summary><b>Windows (PowerShell)</b></summary>
+<summary><b>Windows - Chrome (PowerShell)</b></summary>
 
 ```powershell
 # 先关闭所有 Chrome
@@ -41,7 +41,19 @@ Start-Process "C:\Program Files\Google\Chrome\Application\chrome.exe" -ArgumentL
 </details>
 
 <details>
-<summary><b>Linux</b></summary>
+<summary><b>Windows - Edge (PowerShell)</b></summary>
+
+```powershell
+# 先关闭所有 Edge
+taskkill /F /IM msedge.exe
+
+# 用调试模式启动
+Start-Process "C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" -ArgumentList "--remote-debugging-port=9222", "--user-data-dir=C:\selenium_edge_profile"
+```
+</details>
+
+<details>
+<summary><b>Linux - Chrome</b></summary>
 
 ```bash
 # 先关闭所有 Chrome
@@ -53,7 +65,7 @@ google-chrome --remote-debugging-port=9222 --user-data-dir=/tmp/selenium_chrome_
 </details>
 
 <details>
-<summary><b>macOS</b></summary>
+<summary><b>macOS - Chrome</b></summary>
 
 ```bash
 # 先关闭所有 Chrome
@@ -71,7 +83,11 @@ pkill -f "Google Chrome"
 **步骤 3：运行下载工具**
 
 ```bash
+# Chrome
 python -m src --query "deep learning" --debugger-address "127.0.0.1:9222" --browser chrome --download-dir ./downloads --max-results 10 -v
+
+# Edge
+python -m src --query "deep learning" --debugger-address "127.0.0.1:9222" --browser edge --download-dir ./downloads --max-results 10 -v
 ```
 
 ### 方式 2：使用 IEEE 搜索结果 URL
@@ -121,12 +137,48 @@ python -m src --help
 | `--download-dir` | 下载目录 |
 | `--browser` | 浏览器类型：`edge`（默认）或 `chrome` |
 | `--debugger-address` | 连接已运行的浏览器（如 `127.0.0.1:9222`） |
-| `--user-data-dir` | 浏览器配置文件目录 |
+| `--user-data-dir` | 浏览器配置文件目录（详见下方说明） |
 | `--headless` | 无界面模式 |
 | `-v`, `--verbose` | 显示详细进度 |
 | `--debug` | 显示调试日志 |
 | `--sleep-between` | 下载间隔秒数（默认 5） |
 | `--per-download-timeout` | 单个下载超时秒数（默认 300） |
+
+### 关于 `--user-data-dir`
+
+浏览器配置文件目录包含登录状态、cookies、扩展等。有两种使用方式：
+
+**方式 A：创建新的配置目录（推荐用于调试模式）**
+
+```bash
+# 创建一个新的空目录，浏览器会在其中创建新的配置文件
+--user-data-dir="./selenium_profile"
+```
+
+**方式 B：复用现有浏览器配置（包含已登录的会话）**
+
+浏览器默认配置目录位置：
+
+| 浏览器 | 操作系统 | 默认路径 |
+|--------|----------|----------|
+| Chrome | Windows | `C:\Users\<用户名>\AppData\Local\Google\Chrome\User Data` |
+| Chrome | macOS | `~/Library/Application Support/Google/Chrome` |
+| Chrome | Linux | `~/.config/google-chrome` |
+| Edge | Windows | `C:\Users\<用户名>\AppData\Local\Microsoft\Edge\User Data` |
+| Edge | macOS | `~/Library/Application Support/Microsoft Edge` |
+| Edge | Linux | `~/.config/microsoft-edge` |
+
+> ⚠️ **注意**：直接使用默认配置目录可能与正在运行的浏览器冲突。建议复制一份或使用调试模式连接已运行的浏览器。
+
+**复用已有配置示例：**
+
+```bash
+# Windows - 复用 Chrome 默认配置（确保 Chrome 已关闭）
+python -m src --query "test" --user-data-dir "C:\Users\你的用户名\AppData\Local\Google\Chrome\User Data" --download-dir ./downloads
+
+# Linux - 复用 Chrome 配置
+python -m src --query "test" --user-data-dir ~/.config/google-chrome --download-dir ./downloads
+```
 
 ## 输出文件
 
