@@ -143,6 +143,13 @@ python -m src --help
 | `--debug` | 显示调试日志 |
 | `--sleep-between` | 下载间隔秒数（默认 5） |
 | `--per-download-timeout` | 单个下载超时秒数（默认 300） |
+| `--stats` | 显示下载统计信息 |
+| `--list [status]` | 列出论文（all/downloaded/skipped/failed/pending） |
+| `--search-db KEYWORD` | 在数据库中搜索论文 |
+| `--export [json/csv]` | 导出论文列表 |
+| `--retry-failed` | 重试下载失败的论文 |
+| `--migrate-jsonl` | 从旧版 JSONL 迁移到数据库 |
+| `--tasks` | 显示最近的下载任务 |
 
 ### 关于 `--user-data-dir`
 
@@ -185,12 +192,74 @@ python -m src --query "test" --user-data-dir ~/.config/google-chrome --download-
 下载目录中包含：
 
 - `*.pdf`：下载的论文 PDF
-- `download_state.jsonl`：下载状态记录（用于断点续传）
+- `papers.db`：SQLite 数据库（论文记录和下载任务）
+- `download_state.jsonl`：旧版状态记录（兼容）
 
-状态记录示例：
-```json
-{"arnumber": "10163020", "title": "...", "status": "downloaded", "file": "...", "ts": 1702400000}
-{"arnumber": "10163021", "title": "...", "status": "skipped", "error": "No access", "ts": 1702400001}
+## 数据库功能
+
+工具使用 SQLite 数据库管理下载记录，支持以下功能：
+
+### 查看统计信息
+
+```bash
+python -m src --download-dir ./downloads --stats
+```
+
+输出示例：
+```
+=== Download Statistics ===
+  Total papers:    150
+  Downloaded:      120
+  Skipped:         25
+  Failed:          5
+  Pending:         0
+  Total size:      450.5 MB
+```
+
+### 列出论文
+
+```bash
+# 列出所有已下载的论文
+python -m src --download-dir ./downloads --list downloaded
+
+# 列出失败的论文
+python -m src --download-dir ./downloads --list failed
+```
+
+### 搜索论文
+
+```bash
+python -m src --download-dir ./downloads --search-db "reinforcement learning"
+```
+
+### 重试失败的论文
+
+```bash
+python -m src --download-dir ./downloads --retry-failed --debugger-address "127.0.0.1:9222" --browser chrome
+```
+
+### 导出论文列表
+
+```bash
+# 导出为 JSON
+python -m src --download-dir ./downloads --export json
+
+# 导出为 CSV
+python -m src --download-dir ./downloads --export csv
+```
+
+### 查看下载任务历史
+
+```bash
+python -m src --download-dir ./downloads --tasks
+```
+
+### 从旧版迁移
+
+如果之前使用过 JSONL 格式：
+
+```bash
+python -m src --download-dir ./downloads --migrate-jsonl
 ```
 
 ## 特性说明

@@ -14,6 +14,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 
 from .selenium_utils import safe_rename, wait_for_document_ready, wait_for_pdf_download
 from .state import append_state_record, load_downloaded_arnumbers
+from .database import PapersDatabase
 
 logger = logging.getLogger(__name__)
 
@@ -52,12 +53,14 @@ class IeeeXploreDownloader:
         state_file: Path,
         per_download_timeout_seconds: float,
         sleep_between_downloads_seconds: float,
+        database: Optional[PapersDatabase] = None,
     ) -> None:
         self._driver = driver
         self._download_dir = download_dir
         self._state_file = state_file
         self._per_download_timeout_seconds = per_download_timeout_seconds
         self._sleep_between_downloads_seconds = sleep_between_downloads_seconds
+        self._db = database
 
     def manual_login(self) -> None:
         self._driver.get("https://ieeexplore.ieee.org/Xplore/home.jsp")
@@ -217,11 +220,16 @@ class IeeeXploreDownloader:
 
         return papers
 
-    def download_papers(self, papers: Iterable[Dict[str, str]]) -> None:
+    def download_papers(
+        self, papers: Iterable[Dict[str, str]], task_id: Optional[int] = None
+    ) -> None:
         papers_list = list(papers)
         already_downloaded = load_downloaded_arnumbers(self._state_file)
 
         total = len(papers_list)
+        downloaded_count = 0
+        skipped_count = 0
+        failed_count = 0
 
         for idx, paper in enumerate(papers_list, start=1):
             arnumber = str(paper.get("arnumber") or "").strip()
@@ -232,8 +240,15 @@ class IeeeXploreDownloader:
             if not arnumber:
                 continue
 
+            # Check database first (if available)
+            if self._db and self._db.is_paper_downloaded(arnumber):
+                print(f"{prefix} Skip (in database) arnumber={arnumber}")
+                skipped_count += 1
+                continue
+
             if arnumber in already_downloaded:
                 print(f"{prefix} Skip (already downloaded) arnumber={arnumber}")
+                skipped_count += 1
                 continue
 
             target_name = f"{arnumber}.pdf"
@@ -254,8 +269,17 @@ class IeeeXploreDownloader:
                         "ts": time.time(),
                     },
                 )
+                # Also record in database
+                if self._db:
+                    self._db.add_paper(arnumber, title, task_id=task_id, status="downloaded")
+                    self._db.mark_downloaded(arnumber, str(target_path), target_path.stat().st_size)
                 already_downloaded.add(arnumber)
+                skipped_count += 1
                 continue
+
+            # Add paper to database as pending
+            if self._db:
+                self._db.add_paper(arnumber, title, task_id=task_id, status="pending")
 
             try:
                 print(f"{prefix} Downloading arnumber={arnumber} title={title}")
@@ -263,6 +287,8 @@ class IeeeXploreDownloader:
                 if target_path.exists():
                     target_path = self._download_dir / f"{arnumber} - {int(time.time())}.pdf"
                 safe_rename(downloaded_path, target_path)
+
+                file_size = target_path.stat().st_size if target_path.exists() else None
 
                 append_state_record(
                     self._state_file,
@@ -274,7 +300,12 @@ class IeeeXploreDownloader:
                         "ts": time.time(),
                     },
                 )
+                # Update database
+                if self._db:
+                    self._db.mark_downloaded(arnumber, str(target_path), file_size)
+                
                 already_downloaded.add(arnumber)
+                downloaded_count += 1
                 print(f"{prefix} Downloaded -> {target_path}")
 
             except Exception as e:
@@ -282,8 +313,14 @@ class IeeeXploreDownloader:
                 # Check if it's an access denied / no access issue
                 if "access" in error_msg.lower() or "timeout" in error_msg.lower():
                     print(f"{prefix} Skipped (no access or timeout) arnumber={arnumber}")
+                    if self._db:
+                        self._db.mark_skipped(arnumber, error_msg)
+                    skipped_count += 1
                 else:
                     print(f"{prefix} Failed arnumber={arnumber}: {e}")
+                    if self._db:
+                        self._db.mark_failed(arnumber, error_msg)
+                    failed_count += 1
                 
                 append_state_record(
                     self._state_file,
@@ -297,7 +334,25 @@ class IeeeXploreDownloader:
                 )
                 # Continue to next paper
 
+            # Update task stats periodically
+            if self._db and task_id and idx % 5 == 0:
+                self._db.update_task_stats(
+                    task_id,
+                    downloaded_count=downloaded_count,
+                    skipped_count=skipped_count,
+                    failed_count=failed_count,
+                )
+
             time.sleep(self._sleep_between_downloads_seconds)
+
+        # Final task stats update
+        if self._db and task_id:
+            self._db.update_task_stats(
+                task_id,
+                downloaded_count=downloaded_count,
+                skipped_count=skipped_count,
+                failed_count=failed_count,
+            )
 
     def _download_pdf_by_arnumber(self, arnumber: str, max_retries: int = 3) -> Path:
         """Download PDF for a given arnumber with retry logic."""

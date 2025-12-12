@@ -7,6 +7,7 @@ from pathlib import Path
 
 from .ieee_xplore import IeeeXploreDownloader
 from .selenium_utils import create_driver, connect_to_existing_browser
+from .database import PapersDatabase
 
 
 def _setup_logging(verbose: bool, debug: bool) -> None:
@@ -76,7 +77,85 @@ Examples:
     p.add_argument("-v", "--verbose", action="store_true", help="Show progress info")
     p.add_argument("--debug", action="store_true", help="Show detailed debug logs")
 
+    # Database commands
+    p.add_argument("--stats", action="store_true", help="Show download statistics and exit")
+    p.add_argument("--list", choices=["all", "downloaded", "skipped", "failed", "pending"], 
+                   help="List papers by status and exit")
+    p.add_argument("--search-db", metavar="KEYWORD", help="Search papers in database and exit")
+    p.add_argument("--export", choices=["json", "csv"], help="Export papers to file and exit")
+    p.add_argument("--retry-failed", action="store_true", help="Retry downloading failed papers")
+    p.add_argument("--migrate-jsonl", action="store_true", help="Migrate data from JSONL to database")
+    p.add_argument("--tasks", action="store_true", help="Show recent download tasks")
+
     return p.parse_args()
+
+
+def _handle_db_commands(args: argparse.Namespace, db: PapersDatabase, download_dir: Path) -> bool:
+    """Handle database-only commands. Returns True if a command was handled."""
+    
+    if args.stats:
+        stats = db.get_stats()
+        print("\n=== Download Statistics ===")
+        print(f"  Total papers:    {stats['total']}")
+        print(f"  Downloaded:      {stats['downloaded']}")
+        print(f"  Skipped:         {stats['skipped']}")
+        print(f"  Failed:          {stats['failed']}")
+        print(f"  Pending:         {stats['pending']}")
+        print(f"  Total size:      {stats['total_size_mb']} MB")
+        return True
+    
+    if args.list:
+        status = args.list if args.list != "all" else None
+        if status:
+            papers = db.get_papers_by_status(status)
+        else:
+            papers = db.get_papers_by_status("downloaded") + \
+                     db.get_papers_by_status("skipped") + \
+                     db.get_papers_by_status("failed") + \
+                     db.get_papers_by_status("pending")
+        
+        print(f"\n=== Papers ({args.list}) ===")
+        for p in papers:
+            status_icon = {"downloaded": "✓", "skipped": "⊘", "failed": "✗", "pending": "○"}.get(p["status"], "?")
+            print(f"  [{status_icon}] {p['arnumber']}: {p['title'][:60]}...")
+        print(f"\nTotal: {len(papers)}")
+        return True
+    
+    if args.search_db:
+        papers = db.search_papers(args.search_db)
+        print(f"\n=== Search Results for '{args.search_db}' ===")
+        for p in papers:
+            print(f"  [{p['status']}] {p['arnumber']}: {p['title']}")
+        print(f"\nFound: {len(papers)}")
+        return True
+    
+    if args.export:
+        if args.export == "json":
+            output_path = download_dir / "papers_export.json"
+            count = db.export_to_json(output_path)
+        else:
+            output_path = download_dir / "papers_export.csv"
+            count = db.export_to_csv(output_path)
+        print(f"[+] Exported {count} papers to {output_path}")
+        return True
+    
+    if args.migrate_jsonl:
+        state_file = download_dir / "download_state.jsonl"
+        count = db.migrate_from_jsonl(state_file)
+        print(f"[+] Migrated {count} records from {state_file}")
+        return True
+    
+    if args.tasks:
+        tasks = db.get_recent_tasks(limit=10)
+        print("\n=== Recent Download Tasks ===")
+        for t in tasks:
+            status_icon = "✓" if t["status"] == "completed" else "○"
+            query = t["query"] or t["search_url"][:50] + "..." if t["search_url"] else "N/A"
+            print(f"  [{status_icon}] Task #{t['id']}: {query}")
+            print(f"      Downloaded: {t['downloaded_count']}, Skipped: {t['skipped_count']}, Failed: {t['failed_count']}")
+        return True
+    
+    return False
 
 
 def main() -> None:
@@ -90,8 +169,15 @@ def main() -> None:
     download_dir.mkdir(parents=True, exist_ok=True)
     state_file = download_dir / "download_state.jsonl"
     
+    # Initialize database
+    db = PapersDatabase(download_dir)
     print(f"[*] Download directory: {download_dir}")
-    print(f"[*] State file: {state_file}")
+    print(f"[*] Database: {download_dir / 'papers.db'}")
+
+    # Handle database-only commands (no browser needed)
+    if _handle_db_commands(args, db, download_dir):
+        db.close()
+        return
 
     # Validate headless mode requirements (not needed when connecting to existing browser)
     if args.headless and not args.debugger_address and not args.user_data_dir and not (args.email and (args.password or os.environ.get("IEEE_PASSWORD"))):
@@ -129,6 +215,7 @@ def main() -> None:
         logger.error(f"Failed to start/connect browser: {e}")
         raise SystemExit(f"[!] Failed to start/connect browser: {e}")
 
+    task_id = None
     try:
         downloader = IeeeXploreDownloader(
             driver=driver,
@@ -136,6 +223,7 @@ def main() -> None:
             state_file=state_file,
             per_download_timeout_seconds=args.per_download_timeout,
             sleep_between_downloads_seconds=args.sleep_between,
+            database=db,
         )
 
         # Login (skip if connecting to existing browser - assume already logged in)
@@ -153,43 +241,67 @@ def main() -> None:
             downloader.manual_login()
             print("[+] Login successful!")
 
-        # Collect papers
-        print("[*] Collecting papers from search results...")
-        if args.search_url:
-            papers = downloader.collect_papers_from_search_url(
-                search_url=args.search_url,
-                max_results=args.max_results,
-                rows_per_page=args.rows_per_page,
-                max_pages=args.max_pages,
-            )
+        # Handle retry-failed mode
+        if args.retry_failed:
+            failed_papers = db.get_failed_papers()
+            if not failed_papers:
+                print("[*] No failed papers to retry.")
+                return
+            print(f"[*] Retrying {len(failed_papers)} failed papers...")
+            task_id = db.create_task(query="retry-failed", max_results=len(failed_papers))
+            papers = [{"arnumber": p["arnumber"], "title": p["title"]} for p in failed_papers]
+            # Reset status to pending for retry
+            for p in failed_papers:
+                db.update_paper_status(p["arnumber"], "pending")
         else:
-            papers = downloader.collect_papers(
-                query_text=args.query,
-                year_from=args.year_from,
-                year_to=args.year_to,
-                max_results=args.max_results,
-                rows_per_page=args.rows_per_page,
-                max_pages=args.max_pages,
-            )
+            # Collect papers
+            print("[*] Collecting papers from search results...")
+            if args.search_url:
+                papers = downloader.collect_papers_from_search_url(
+                    search_url=args.search_url,
+                    max_results=args.max_results,
+                    rows_per_page=args.rows_per_page,
+                    max_pages=args.max_pages,
+                )
+                task_id = db.create_task(search_url=args.search_url, max_results=args.max_results)
+            else:
+                papers = downloader.collect_papers(
+                    query_text=args.query,
+                    year_from=args.year_from,
+                    year_to=args.year_to,
+                    max_results=args.max_results,
+                    rows_per_page=args.rows_per_page,
+                    max_pages=args.max_pages,
+                )
+                task_id = db.create_task(query=args.query, max_results=args.max_results)
         
-        print(f"[+] Found {len(papers)} papers to download")
+        print(f"[+] Found {len(papers)} papers to download (Task #{task_id})")
+        db.update_task_stats(task_id, total_found=len(papers))
         
         if not papers:
             print("[!] No papers found. Check your search query or URL.")
+            db.complete_task(task_id, status="no_results")
             return
 
         # Download papers
         print("[*] Starting downloads...")
-        downloader.download_papers(papers)
+        downloader.download_papers(papers, task_id=task_id)
         
+        db.complete_task(task_id, status="completed")
         print("[+] Download complete!")
 
     except KeyboardInterrupt:
         print("\n[!] Interrupted by user")
+        if task_id:
+            db.complete_task(task_id, status="interrupted")
     except Exception as e:
         logger.exception("Unexpected error")
         print(f"[!] Error: {e}")
+        if task_id:
+            db.complete_task(task_id, status="error")
     finally:
+        # Close database
+        db.close()
         # Don't quit if we're connected to an existing browser (user's browser)
         if driver and not args.debugger_address:
             driver.quit()
