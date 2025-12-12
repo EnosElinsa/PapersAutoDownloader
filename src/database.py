@@ -22,7 +22,8 @@ class PapersDatabase:
 
     def _init_db(self) -> None:
         """Initialize database and create tables if needed."""
-        self._conn = sqlite3.connect(str(self._db_path))
+        # check_same_thread=False allows connection to be used across threads (for GUI)
+        self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         
         cursor = self._conn.cursor()
@@ -166,6 +167,15 @@ class PapersDatabase:
             (limit,),
         )
         return [dict(row) for row in cursor.fetchall()]
+
+    def delete_task(self, task_id: int) -> None:
+        """Delete a task and its associated papers."""
+        # Delete associated papers first
+        self._conn.execute("DELETE FROM papers WHERE task_id = ?", (task_id,))
+        # Delete the task
+        self._conn.execute("DELETE FROM download_tasks WHERE id = ?", (task_id,))
+        self._conn.commit()
+        logger.debug(f"Task {task_id} and associated papers deleted")
 
     # ========== Paper Management ==========
 

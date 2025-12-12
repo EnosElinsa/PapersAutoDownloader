@@ -6,11 +6,14 @@
 
 ## 功能特性
 
+- **双模式支持**：命令行 (CLI) 和图形界面 (GUI)
+- **Material Design GUI**：基于 Flet/Flutter 的现代化界面
 - 支持 Edge / Chrome 浏览器（Linux/macOS 推荐 Chrome）
 - 多种登录方式：手动登录、凭证登录、复用已登录的浏览器
 - **连接已运行的浏览器**（推荐）：复用已登录的 Chrome/Edge 会话
 - 支持关键词搜索或直接使用 IEEE 搜索结果 URL
 - 自动分页下载，支持断点续传
+- **SQLite 数据库管理**：论文记录、任务历史、统计信息
 - **智能跳过无权限论文**：自动检测并跳过无访问权限的论文
 - 下载失败自动重试（最多 3 次）
 
@@ -18,6 +21,22 @@
 
 ```bash
 pip install -r requirements.txt
+```
+
+## 启动方式
+
+### GUI 模式（推荐）
+
+```bash
+python -m src --gui
+```
+
+![GUI Screenshot](docs/gui-screenshot.png)
+
+### CLI 模式
+
+```bash
+python -m src --query "deep learning" --debugger-address "127.0.0.1:9222" --browser chrome
 ```
 
 ## 快速开始
