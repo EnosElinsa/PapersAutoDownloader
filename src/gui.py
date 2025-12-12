@@ -626,7 +626,7 @@ class PaperDownloaderApp:
                         ft.Icons.PENDING,
                         color=status_color,
                     ),
-                    title=ft.Text(paper["title"][:80] + "..." if len(paper["title"]) > 80 else paper["title"]),
+                    title=ft.Text(paper["title"][:120] + "..." if len(paper["title"]) > 80 else paper["title"]),
                     subtitle=ft.Text(f"arnumber: {paper['arnumber']}"),
                     trailing=ft.Text(paper["status"], color=status_color),
                 )
@@ -984,7 +984,7 @@ class PaperDownloaderApp:
                     break
 
                 arnumber = paper.get("arnumber")
-                title = paper.get("title", "")[:80]
+                title = paper.get("title", "")[:120]
                 
                 self.progress_text.value = f"[{idx}/{len(papers)}] {title}..."
                 self.progress_bar.value = idx / len(papers)
