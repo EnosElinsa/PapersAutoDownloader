@@ -273,21 +273,27 @@ def main() -> None:
                     rows_per_page=args.rows_per_page,
                     max_pages=args.max_pages,
                 )
-                task_id = db.create_task(query=args.query, max_results=args.max_results)
-        
-        print(f"[+] Found {len(papers)} papers to download (Task #{task_id})")
-        db.update_task_stats(task_id, total_found=len(papers))
+                if len(papers) >= 50:
+                    task_id = db.create_task(query=args.query, max_results=args.max_results)
+
+        if task_id is not None:
+            print(f"[+] Found {len(papers)} papers to download (Task #{task_id})")
+            db.update_task_stats(task_id, total_found=len(papers))
+        else:
+            print(f"[+] Found {len(papers)} papers to download")
         
         if not papers:
             print("[!] No papers found. Check your search query or URL.")
-            db.complete_task(task_id, status="no_results")
+            if task_id is not None:
+                db.complete_task(task_id, status="no_results")
             return
 
         # Download papers
         print("[*] Starting downloads...")
         downloader.download_papers(papers, task_id=task_id)
         
-        db.complete_task(task_id, status="completed")
+        if task_id is not None:
+            db.complete_task(task_id, status="completed")
         print("[+] Download complete!")
 
     except KeyboardInterrupt:

@@ -29,6 +29,7 @@ class PapersDatabase:
         cursor = self._conn.cursor()
         
         # Papers table
+        # status can be: pending, downloading, downloaded, skipped, failed
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS papers (
                 arnumber TEXT PRIMARY KEY,
@@ -177,6 +178,33 @@ class PapersDatabase:
         self._conn.commit()
         logger.debug(f"Task {task_id} and associated papers deleted")
 
+    def find_task_by_url(self, search_url: str) -> Optional[Dict[str, Any]]:
+        """Find an existing task by search URL."""
+        cursor = self._conn.execute(
+            "SELECT * FROM download_tasks WHERE search_url = ? ORDER BY created_at DESC LIMIT 1",
+            (search_url,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def find_task_by_query(self, query: str) -> Optional[Dict[str, Any]]:
+        """Find an existing task by query text."""
+        cursor = self._conn.execute(
+            "SELECT * FROM download_tasks WHERE query = ? ORDER BY created_at DESC LIMIT 1",
+            (query,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+    def resume_task(self, task_id: int) -> None:
+        """Resume a task by setting its status back to running."""
+        self._conn.execute(
+            "UPDATE download_tasks SET status = 'running', completed_at = NULL WHERE id = ?",
+            (task_id,),
+        )
+        self._conn.commit()
+        logger.debug(f"Task {task_id} resumed")
+
     # ========== Paper Management ==========
 
     def paper_exists(self, arnumber: str) -> bool:
@@ -278,13 +306,18 @@ class PapersDatabase:
     # ========== Query Methods ==========
 
     def get_papers_by_status(
-        self, status: str, limit: Optional[int] = None
+        self, status: str, task_id: Optional[int] = None, limit: Optional[int] = None
     ) -> List[Dict[str, Any]]:
-        """Get papers filtered by status."""
-        query = "SELECT * FROM papers WHERE status = ? ORDER BY updated_at DESC"
+        """Get papers filtered by status and optionally by task_id."""
+        if task_id:
+            query = "SELECT * FROM papers WHERE status = ? AND task_id = ? ORDER BY updated_at DESC"
+            params = (status, task_id)
+        else:
+            query = "SELECT * FROM papers WHERE status = ? ORDER BY updated_at DESC"
+            params = (status,)
         if limit:
             query += f" LIMIT {limit}"
-        cursor = self._conn.execute(query, (status,))
+        cursor = self._conn.execute(query, params)
         return [dict(row) for row in cursor.fetchall()]
 
     def get_failed_papers(self) -> List[Dict[str, Any]]:
