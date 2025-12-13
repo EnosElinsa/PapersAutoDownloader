@@ -46,6 +46,9 @@ class PaperDownloaderApp:
         self.stop_requested = False
         self.current_task_id: Optional[int] = None
         
+        # Download queue
+        self.download_queue: list[str] = []
+        
         # Setup page
         self.page.title = "IEEE Xplore Paper Downloader"
         self.page.theme_mode = ft.ThemeMode.LIGHT
@@ -1014,6 +1017,173 @@ class PaperDownloaderApp:
 
         self.download_thread = threading.Thread(target=download_single, daemon=True)
         self.download_thread.start()
+
+    def _start_queue_download(self):
+        """Start downloading papers from the queue."""
+        if self.is_downloading:
+            self._show_snackbar("A download is already in progress", ft.Colors.ORANGE)
+            return
+        if not self.download_queue:
+            self._show_snackbar("Queue is empty", ft.Colors.ORANGE)
+            return
+
+        self.is_downloading = True
+        self.stop_requested = False
+        self.start_button.visible = False
+        self.stop_button.visible = True
+        self.stop_button.disabled = False
+        self.progress_bar.visible = True
+        self.log_view.controls.clear()
+        self.page.update()
+
+        self.download_thread = threading.Thread(target=self._queue_download_worker, daemon=True)
+        self.download_thread.start()
+
+    def _queue_download_worker(self):
+        """Background worker for queue downloads."""
+        try:
+            self._init_db()
+            self.download_dir.mkdir(parents=True, exist_ok=True)
+            state_file = self.download_dir / "download_state.jsonl"
+
+            self._log_styled(f"Starting queue download ({len(self.download_queue)} papers)...", "info")
+            
+            if self.stop_requested:
+                self._log_styled("Stopped before connecting", "warning")
+                self._download_finished()
+                return
+
+            try:
+                self.driver = connect_to_existing_browser(
+                    download_dir=self.download_dir,
+                    debugger_address=self.debugger_address.value,
+                    browser=self.browser_dropdown.value,
+                )
+                self._log_styled("Connected to browser!", "success")
+            except Exception as ex:
+                self._log_styled(f"Failed to connect: {ex}", "error")
+                self._download_finished()
+                return
+
+            try:
+                per_download_timeout_seconds = float(str(self.per_download_timeout or "300").strip())
+            except Exception:
+                per_download_timeout_seconds = 300.0
+
+            try:
+                sleep_between_downloads_seconds = float(str(self.sleep_between or "5").strip())
+            except Exception:
+                sleep_between_downloads_seconds = 5.0
+
+            self.downloader = IeeeXploreDownloader(
+                driver=self.driver,
+                download_dir=self.download_dir,
+                state_file=state_file,
+                per_download_timeout_seconds=per_download_timeout_seconds,
+                sleep_between_downloads_seconds=sleep_between_downloads_seconds,
+                database=self.db,
+                stop_check=lambda: self.stop_requested,
+            )
+
+            downloaded_count = 0
+            skipped_count = 0
+            failed_count = 0
+            total = len(self.download_queue)
+            
+            # Process queue (copy to avoid modification during iteration)
+            queue_copy = list(self.download_queue)
+            
+            for idx, arnumber in enumerate(queue_copy, start=1):
+                if self.stop_requested or not self.is_downloading:
+                    self._log_styled("Download stopped by user", "warning")
+                    break
+
+                paper = self.db.get_paper(arnumber)
+                if not paper:
+                    self._log_styled(f"[{idx}/{total}] Paper not found: {arnumber}", "warning")
+                    self.download_queue.remove(arnumber)
+                    continue
+
+                title = paper.get("title", "")
+                title_short = title[:60] + "..." if len(title) > 60 else title
+                
+                self.progress_text.value = f"[{idx}/{total}] {title_short}"
+                self.progress_bar.value = idx / total
+                self.page.update()
+
+                if self.db.is_paper_downloaded(arnumber):
+                    self._log_styled(f"[{idx}/{total}] Skip: {arnumber} (already downloaded)", "skip")
+                    skipped_count += 1
+                    self.download_queue.remove(arnumber)
+                    continue
+
+                self._log_styled(f"[{idx}/{total}] Downloading: {title_short}", "progress")
+                self.db.update_paper_status(arnumber, status="downloading")
+                
+                try:
+                    if self.stop_requested:
+                        self.db.update_paper_status(arnumber, status="pending")
+                        raise InterruptedError("Download stopped by user")
+                    
+                    downloaded_file = self.downloader._download_pdf_by_arnumber(arnumber)
+                    
+                    file_size = None
+                    file_path_str = None
+                    if downloaded_file and downloaded_file.exists():
+                        file_size = downloaded_file.stat().st_size
+                        file_path_str = str(downloaded_file)
+                    
+                    self._log_styled(f"[{idx}/{total}] ✓ Downloaded: {arnumber}", "success")
+                    downloaded_count += 1
+                    self.db.update_paper_status(arnumber, status="downloaded", file_path=file_path_str, file_size=file_size)
+                    self.download_queue.remove(arnumber)
+                    
+                except InterruptedError:
+                    self._log_styled("Download interrupted", "warning")
+                    break
+                
+                except StopRequestedException:
+                    self._log_styled("Download stopped by user", "warning")
+                    self.db.update_paper_status(arnumber, status="pending")
+                    break
+                    
+                except PermissionError as ex:
+                    self._log_styled(f"[{idx}/{total}] ⊘ No access: {arnumber}", "skip")
+                    skipped_count += 1
+                    self.db.update_paper_status(arnumber, status="skipped", error_message=str(ex))
+                    self.download_queue.remove(arnumber)
+                    
+                except Exception as ex:
+                    error_msg = str(ex)
+                    if "access" in error_msg.lower() or "permission" in error_msg.lower():
+                        self._log_styled(f"[{idx}/{total}] ⊘ No access: {arnumber}", "skip")
+                        skipped_count += 1
+                        self.db.update_paper_status(arnumber, status="skipped", error_message=error_msg)
+                    else:
+                        self._log_styled(f"[{idx}/{total}] ✗ Failed: {error_msg[:60]}", "error")
+                        failed_count += 1
+                        self.db.update_paper_status(arnumber, status="failed", error_message=error_msg)
+                    self.download_queue.remove(arnumber)
+
+                # Brief sleep between downloads
+                sleep_start = time.time()
+                while time.time() - sleep_start < sleep_between_downloads_seconds:
+                    if self.stop_requested:
+                        break
+                    time.sleep(0.2)
+
+            else:
+                self._log_styled("✓ Queue download complete!", "success")
+                self._send_notification(
+                    "Queue Download Complete",
+                    f"Downloaded {downloaded_count}, skipped {skipped_count}, failed {failed_count}"
+                )
+
+        except Exception as ex:
+            self._log_styled(f"Error: {ex}", "error")
+            logger.exception("Queue download error")
+        finally:
+            self._download_finished()
 
 
 def main(page: ft.Page):

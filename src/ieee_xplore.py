@@ -370,13 +370,19 @@ class IeeeXploreDownloader:
                 logger.warning(f"No access to arnumber={arnumber}")
                 raise
             except RuntimeError as e:
-                # Rate limited - wait longer with exponential backoff
-                if "denied" in str(e).lower() or "rate" in str(e).lower():
+                error_msg = str(e).lower()
+                # Check if it's a rate limit (should retry) vs subscription issue (should not retry)
+                if "rate" in error_msg and "limit" in error_msg:
+                    # Definite rate limit - retry with backoff
                     backoff_time = 30 * attempt  # 30s, 60s, 90s
                     logger.warning(f"Rate limited on attempt {attempt}, waiting {backoff_time}s...")
                     print(f"[!] IEEE rate limit detected, waiting {backoff_time}s before retry...")
                     time.sleep(backoff_time)
                     last_error = e
+                elif "subscription" in error_msg or "outside" in error_msg or "purchase" in error_msg:
+                    # Subscription/access issue - don't retry, raise as PermissionError
+                    logger.warning(f"No subscription access to arnumber={arnumber}")
+                    raise PermissionError(f"No subscription access: {e}")
                 else:
                     raise
             except TimeoutError as e:
@@ -566,35 +572,55 @@ class IeeeXploreDownloader:
             logger.warning("Page load timed out, continuing anyway")
 
     def _check_request_denied(self) -> bool:
-        """Check if IEEE has denied the request (rate limiting)."""
+        """Check if IEEE has rate-limited the request (NOT subscription denial)."""
+        # Note: "denied=" in URL can mean subscription/access denied OR rate limit
+        # Need to check page content to distinguish
         current_url = self._driver.current_url
-        if "denied=" in current_url or "?denied" in current_url:
-            logger.warning(f"Request denied by IEEE: {current_url}")
-            return True
         
-        # Also check page content for denial messages
         try:
             body_text = self._driver.find_element(By.TAG_NAME, "body").text.lower()
-            denial_indicators = [
-                "request denied",
+            
+            # First check if it's a subscription issue (NOT rate limit)
+            subscription_indicators = [
+                "outside of your subscription",
+                "this document is outside",
+                "purchase the document",
+                "contact the ieee customer center",
+                "check to see if you have access",
+            ]
+            for indicator in subscription_indicators:
+                if indicator in body_text:
+                    logger.debug(f"Subscription issue detected (not rate limit): {indicator}")
+                    return False  # Not a rate limit
+            
+            # Check for rate limit indicators
+            rate_limit_indicators = [
                 "too many requests",
                 "rate limit",
                 "please try again later",
                 "temporarily blocked",
+                "request has been blocked",
             ]
-            for indicator in denial_indicators:
+            for indicator in rate_limit_indicators:
                 if indicator in body_text:
-                    logger.warning(f"Request denied detected: found '{indicator}'")
+                    logger.warning(f"Rate limit detected: found '{indicator}'")
                     return True
+                    
         except Exception:
             pass
         return False
 
     def _check_no_access(self) -> bool:
-        """Check if the current page shows an access denied message."""
+        """Check if the current page shows a subscription/access denied message."""
+        current_url = self._driver.current_url
+        
         try:
             body_text = self._driver.find_element(By.TAG_NAME, "body").text.lower()
+            
+            # Check for subscription/access issues
             no_access_indicators = [
+                "outside of your subscription",
+                "this document is outside",
                 "full text access may be available",
                 "access to this document requires",
                 "please sign in",
@@ -605,11 +631,22 @@ class IeeeXploreDownloader:
                 "not authorized",
                 "no access",
                 "access denied",
+                "purchase the document",
+                "contact the ieee customer center",
             ]
             for indicator in no_access_indicators:
                 if indicator in body_text:
                     logger.debug(f"No access detected: found '{indicator}'")
                     return True
+                    
+            # Also check URL for denied parameter with subscription context
+            if "denied=" in current_url or "?denied" in current_url:
+                # URL has denied, check if it's subscription related
+                for indicator in ["subscription", "purchase", "access"]:
+                    if indicator in body_text:
+                        logger.debug(f"No access (URL denied + {indicator})")
+                        return True
+                        
         except Exception as e:
             logger.debug(f"Error checking access: {e}")
         return False
