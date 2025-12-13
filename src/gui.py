@@ -633,18 +633,12 @@ class PaperDownloaderApp:
 
         # Papers list
         self.papers_list = ft.ListView(expand=True, spacing=8)
+        
+        # Stats row (will be updated by _refresh_papers_list)
+        self.papers_stats_row = ft.Row([], spacing=12)
+        
+        # Refresh list and stats
         self._refresh_papers_list()
-
-        # Stats
-        stats = self.db.get_stats() if self.db else {}
-        stats_row = ft.Row([
-            self._stat_chip("Total", stats.get("total", 0), ft.Colors.BLUE),
-            self._stat_chip("Downloaded", stats.get("downloaded", 0), ft.Colors.GREEN),
-            self._stat_chip("Skipped", stats.get("skipped", 0), ft.Colors.ORANGE),
-            self._stat_chip("Failed", stats.get("failed", 0), ft.Colors.RED),
-            ft.Container(expand=True),
-            ft.Text(f"{stats.get('total_size_mb', 0)} MB total", size=12, color=ft.Colors.GREY_600),
-        ], spacing=12)
 
         return ft.Column([
             # Page header
@@ -658,7 +652,7 @@ class PaperDownloaderApp:
                 ], spacing=15),
                 margin=ft.margin.only(bottom=15),
             ),
-            stats_row,
+            self.papers_stats_row,
             ft.Container(height=10),
             # Filter bar
             ft.Container(
@@ -698,11 +692,27 @@ class PaperDownloaderApp:
             border_radius=12,
         )
 
-    def _refresh_papers_list(self):
+    def _refresh_papers_list(self, auto_scan: bool = True):
         """Refresh the papers list."""
         self._init_db()
         if not self.db:
             return
+
+        # Auto-scan for missing file info (quick scan, only for downloaded papers without file info)
+        if auto_scan:
+            self._quick_scan_file_info()
+
+        # Update stats row
+        stats = self.db.get_stats() if self.db else {}
+        if hasattr(self, 'papers_stats_row'):
+            self.papers_stats_row.controls = [
+                self._stat_chip("Total", stats.get("total", 0), ft.Colors.BLUE),
+                self._stat_chip("Downloaded", stats.get("downloaded", 0), ft.Colors.GREEN),
+                self._stat_chip("Skipped", stats.get("skipped", 0), ft.Colors.ORANGE),
+                self._stat_chip("Failed", stats.get("failed", 0), ft.Colors.RED),
+                ft.Container(expand=True),
+                ft.Text(f"{stats.get('total_size_mb', 0)} MB total", size=12, color=ft.Colors.GREY_600),
+            ]
 
         self.papers_list.controls.clear()
 
@@ -905,8 +915,8 @@ class PaperDownloaderApp:
         file_size = paper.get("file_size")
         
         if not file_path and paper["status"] == "downloaded":
-            # Try to find the file in download directory
-            found_file = self._find_paper_file(arnumber)
+            # Try to find the file in download directory (by arnumber or title)
+            found_file = self._find_paper_file(arnumber, paper.get("title"))
             if found_file:
                 file_path = str(found_file)
                 file_size = found_file.stat().st_size
@@ -1740,8 +1750,8 @@ class PaperDownloaderApp:
             else:
                 return "microsoft-edge"
 
-    def _find_paper_file(self, arnumber: str) -> Optional[Path]:
-        """Try to find a downloaded PDF file for the given arnumber."""
+    def _find_paper_file(self, arnumber: str, title: str = None) -> Optional[Path]:
+        """Try to find a downloaded PDF file for the given arnumber or title."""
         if not self.download_dir.exists():
             return None
         
@@ -1753,6 +1763,22 @@ class PaperDownloaderApp:
             # Also check if arnumber is in the filename
             if arnumber in pdf_file.name:
                 return pdf_file
+        
+        # If title is provided, try to match by title
+        if title:
+            # Normalize title for comparison (IEEE uses underscores for spaces)
+            title_normalized = title.replace(" ", "_").replace(":", "").replace("/", "_")
+            title_words = [w.lower() for w in title.split()[:5] if len(w) > 2]  # First 5 significant words
+            
+            for pdf_file in self.download_dir.glob("*.pdf"):
+                filename_lower = pdf_file.stem.lower()
+                # Check if title matches (with underscores)
+                if title_normalized.lower() in filename_lower or filename_lower in title_normalized.lower():
+                    return pdf_file
+                # Check if most title words are in filename
+                matches = sum(1 for w in title_words if w in filename_lower)
+                if len(title_words) > 0 and matches >= len(title_words) * 0.6:
+                    return pdf_file
         
         return None
 
@@ -2218,32 +2244,85 @@ class PaperDownloaderApp:
         count = self.db.migrate_from_jsonl(jsonl_path)
         self._show_snackbar(f"Migrated {count} records from JSONL")
 
-    def _scan_and_update_files(self, e):
-        """Scan download folder and update file info for downloaded papers."""
-        self._init_db()
+    def _quick_scan_file_info(self):
+        """Quick scan to update file info and fix paper statuses."""
+        if not self.db or not self.download_dir.exists():
+            return
         
-        # Get all downloaded papers without file info
-        papers = self.db.get_papers_by_status("downloaded")
-        updated_count = 0
+        updated_task_ids = set()
         
-        for paper in papers:
-            arnumber = paper["arnumber"]
-            # Skip if already has file info
+        # 1. Fix downloaded papers missing file info
+        for paper in self.db.get_papers_by_status("downloaded"):
             if paper.get("file_path") and paper.get("file_size"):
                 continue
             
-            # Try to find the file
-            found_file = self._find_paper_file(arnumber)
+            arnumber = paper["arnumber"]
+            found_file = self._find_paper_file(arnumber, paper.get("title"))
             if found_file:
-                file_path = str(found_file)
-                file_size = found_file.stat().st_size
                 self.db.update_paper_status(
                     arnumber,
                     status="downloaded",
-                    file_path=file_path,
-                    file_size=file_size,
+                    file_path=str(found_file),
+                    file_size=found_file.stat().st_size,
+                )
+                if paper.get("task_id"):
+                    updated_task_ids.add(paper["task_id"])
+        
+        # 2. Fix pending papers that actually have files (were downloaded but status not updated)
+        for paper in self.db.get_papers_by_status("pending"):
+            arnumber = paper["arnumber"]
+            found_file = self._find_paper_file(arnumber, paper.get("title"))
+            if found_file:
+                self.db.update_paper_status(
+                    arnumber,
+                    status="downloaded",
+                    file_path=str(found_file),
+                    file_size=found_file.stat().st_size,
+                )
+                if paper.get("task_id"):
+                    updated_task_ids.add(paper["task_id"])
+        
+        # 3. Recalculate stats for affected tasks
+        for task_id in updated_task_ids:
+            self._recalculate_task_stats(task_id)
+
+    def _scan_and_update_files(self, e):
+        """Scan download folder and update file info for all papers (with UI feedback)."""
+        self._init_db()
+        
+        updated_count = 0
+        updated_task_ids = set()
+        
+        # Check both downloaded (missing file info) and pending (might have files) papers
+        papers_to_check = (
+            self.db.get_papers_by_status("downloaded") +
+            self.db.get_papers_by_status("pending")
+        )
+        
+        for paper in papers_to_check:
+            arnumber = paper["arnumber"]
+            status = paper["status"]
+            
+            # Skip downloaded papers that already have file info
+            if status == "downloaded" and paper.get("file_path") and paper.get("file_size"):
+                continue
+            
+            # Try to find the file (by arnumber or title)
+            found_file = self._find_paper_file(arnumber, paper.get("title"))
+            if found_file:
+                self.db.update_paper_status(
+                    arnumber,
+                    status="downloaded",
+                    file_path=str(found_file),
+                    file_size=found_file.stat().st_size,
                 )
                 updated_count += 1
+                if paper.get("task_id"):
+                    updated_task_ids.add(paper["task_id"])
+        
+        # Recalculate stats for affected tasks
+        for task_id in updated_task_ids:
+            self._recalculate_task_stats(task_id)
         
         self._show_snackbar(f"Updated file info for {updated_count} papers", ft.Colors.GREEN)
 
@@ -2344,7 +2423,14 @@ class PaperDownloaderApp:
 
     def _show_task_detail(self, task_id: int):
         """Show task detail dialog with papers list."""
-        task = self.db.get_task(task_id) if self.db else None
+        if not self.db:
+            self._show_snackbar("Database not initialized", ft.Colors.RED)
+            return
+        
+        # Recalculate task stats from actual paper statuses
+        self._recalculate_task_stats(task_id)
+        
+        task = self.db.get_task(task_id)
         if not task:
             self._show_snackbar("Task not found", ft.Colors.RED)
             return
