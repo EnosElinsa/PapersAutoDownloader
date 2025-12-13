@@ -23,7 +23,7 @@ from .utils.helpers import (
 )
 from .views.download_view import build_download_view
 from .views.papers_view import build_papers_view, build_paper_card, refresh_papers_list, update_papers_stats
-from .views.tasks_view import build_tasks_view, refresh_tasks_view
+from .views.tasks_view import build_tasks_view, refresh_tasks_view, update_current_task_display
 from .views.settings_view import build_settings_view
 from .dialogs.paper_dialogs import show_paper_detail, show_paper_edit_dialog
 from .dialogs.task_dialogs import show_task_detail, show_task_edit_dialog
@@ -46,8 +46,9 @@ class PaperDownloaderApp:
         self.stop_requested = False
         self.current_task_id: Optional[int] = None
         
-        # Download queue
+        # Download queue (will be loaded from settings)
         self.download_queue: list[str] = []
+        self.queue_auto_start = False  # Flag to auto-start queue after current download
         
         # Setup page
         self.page.title = "IEEE Xplore Paper Downloader"
@@ -71,6 +72,9 @@ class PaperDownloaderApp:
         self.sleep_between = str(self.settings.get("sleep_between", "5"))
         self.download_dir = Path(self.settings.get("download_dir", str(Path.cwd() / "downloads")))
         self.current_view = "download"
+        
+        # Load download queue from settings
+        self.download_queue = self.settings.get("download_queue", [])
         
         # Apply saved theme
         if self.settings.get("theme_mode", "light") == "dark":
@@ -116,12 +120,22 @@ class PaperDownloaderApp:
             "search_query": self.query_input.value,
             "search_url": self.url_input.value,
             "theme_mode": "dark" if self.page.theme_mode == ft.ThemeMode.DARK else "light",
+            "download_queue": self.download_queue,  # Persist queue
         }
+        # Preserve other settings like search_history, hourly_quota
+        for key in ["search_history", "hourly_quota", "max_retries", "retry_delay"]:
+            if key in self.settings:
+                settings[key] = self.settings[key]
         try:
             with open(self._get_settings_path(), "w", encoding="utf-8") as f:
                 json.dump(settings, f, ensure_ascii=False, indent=2)
         except Exception as e:
             logger.warning(f"Failed to save settings: {e}")
+
+    def _save_queue(self) -> None:
+        """Save download queue to settings."""
+        self.settings["download_queue"] = self.download_queue
+        self._save_settings()
 
     # ==================== UI Building ====================
     def _build_ui(self):
@@ -534,6 +548,14 @@ class PaperDownloaderApp:
         failed = len(self.db.get_papers_by_status("failed", task_id=task_id))
         self.db.update_task_stats(task_id, downloaded_count=downloaded, skipped_count=skipped, failed_count=failed)
 
+    def _update_task_view_if_visible(self, task_id: int) -> None:
+        """Update the Tasks view if user is currently viewing it."""
+        if self.current_view == "tasks":
+            try:
+                update_current_task_display(self, task_id)
+            except Exception:
+                pass  # Ignore UI update errors
+
     def _delete_task(self, task_id: int):
         if not self.db:
             self._init_db()
@@ -667,6 +689,20 @@ class PaperDownloaderApp:
         self.progress_bar.visible = False
         self.progress_text.value = ""
         self.page.update()
+        
+        # Check if queue should auto-start
+        if self.queue_auto_start and self.download_queue:
+            self.queue_auto_start = False
+            self._log_styled(f"Auto-starting queue download ({len(self.download_queue)} papers)...", "info")
+            self._show_snackbar(f"Starting queue download ({len(self.download_queue)} papers)...", ft.Colors.INDIGO)
+            # Delay slightly to allow UI to update
+            def delayed_queue_start():
+                time.sleep(0.5)
+                self._start_queue_download()
+            threading.Thread(target=delayed_queue_start, daemon=True).start()
+        else:
+            # Reset queue_auto_start flag if queue is empty
+            self.queue_auto_start = False
 
     def _find_matching_task(self, normalized_url: str) -> Optional[dict]:
         """Find existing task with matching normalized URL."""
@@ -838,6 +874,10 @@ class PaperDownloaderApp:
                 self.progress_text.value = f"[{idx}/{len(papers)}] {title_short}"
                 self.progress_bar.value = idx / len(papers)
                 self.page.update()
+                
+                # Update Tasks view periodically (every 3 papers)
+                if idx % 3 == 0:
+                    self._update_task_view_if_visible(task_id)
 
                 self.db.add_paper(arnumber=arnumber, title=title, task_id=task_id)
 
@@ -918,6 +958,9 @@ class PaperDownloaderApp:
                     "Download Complete",
                     f"Downloaded {downloaded_count} papers, {skipped_count} skipped, {failed_count} failed"
                 )
+            
+            # Final update to Tasks view
+            self._update_task_view_if_visible(task_id)
 
         except Exception as ex:
             self._log_styled(f"Error: {ex}", "error")
@@ -1177,6 +1220,13 @@ class PaperDownloaderApp:
                     if self.stop_requested:
                         break
                     time.sleep(0.2)
+                
+                # Update Papers view periodically (every 3 papers)
+                if idx % 3 == 0 and self.current_view == "papers":
+                    try:
+                        self._refresh_papers_list(auto_scan=False)
+                    except Exception:
+                        pass
 
             else:
                 self._log_styled("✓ Queue download complete!", "success")
@@ -1184,11 +1234,20 @@ class PaperDownloaderApp:
                     "Queue Download Complete",
                     f"Downloaded {downloaded_count}, skipped {skipped_count}, failed {failed_count}"
                 )
+            
+            # Final refresh of Papers view
+            if self.current_view == "papers":
+                try:
+                    self._refresh_papers_list(auto_scan=False)
+                except Exception:
+                    pass
 
         except Exception as ex:
             self._log_styled(f"Error: {ex}", "error")
             logger.exception("Queue download error")
         finally:
+            # Save queue state (items may have been removed during download)
+            self._save_queue()
             self._download_finished()
 
 

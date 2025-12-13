@@ -195,3 +195,25 @@ def refresh_tasks_view(app):
     app._tasks_view = build_tasks_view(app)
     app.content.content = app._tasks_view
     app.page.update()
+
+
+def update_current_task_display(app, task_id: int):
+    """Update the display for a specific task without rebuilding the entire view.
+    
+    Called during downloads to show real-time progress.
+    """
+    if not app.db or app.current_view != "tasks":
+        return
+    
+    try:
+        task = app.db.get_task(task_id)
+        if not task:
+            return
+        
+        # Just rebuild the tasks view to show updated stats
+        # This is simpler than trying to update individual controls
+        app._tasks_view = build_tasks_view(app)
+        app.content.content = app._tasks_view
+        app.page.update()
+    except Exception:
+        pass  # Ignore errors during UI update

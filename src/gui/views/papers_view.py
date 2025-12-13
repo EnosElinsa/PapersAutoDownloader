@@ -238,7 +238,16 @@ def _render_current_page(app):
     if hasattr(app, 'queue_badge'):
         queue_count = len(app.download_queue)
         app.queue_badge.content.controls[1].value = str(queue_count)
-        app.queue_badge.bgcolor = ft.Colors.INDIGO if queue_count > 0 else ft.Colors.GREY_600
+        # Show blue if queue is scheduled to auto-start, indigo if has items, grey if empty
+        if getattr(app, 'queue_auto_start', False) and queue_count > 0:
+            app.queue_badge.bgcolor = ft.Colors.BLUE
+            app.queue_badge.tooltip = "Queue scheduled - will start after current download"
+        elif queue_count > 0:
+            app.queue_badge.bgcolor = ft.Colors.INDIGO
+            app.queue_badge.tooltip = "View download queue"
+        else:
+            app.queue_badge.bgcolor = ft.Colors.GREY_600
+            app.queue_badge.tooltip = "Queue is empty"
 
     app.page.update()
 
@@ -355,6 +364,7 @@ def _add_to_queue(app, arnumber: str):
     """Add a paper to the download queue."""
     if arnumber not in app.download_queue:
         app.download_queue.append(arnumber)
+        app._save_queue()  # Persist queue
         app._show_snackbar(f"Added to queue (#{len(app.download_queue)})", ft.Colors.INDIGO)
         _render_current_page(app)
 
@@ -363,6 +373,7 @@ def _remove_from_queue(app, arnumber: str):
     """Remove a paper from the download queue."""
     if arnumber in app.download_queue:
         app.download_queue.remove(arnumber)
+        app._save_queue()  # Persist queue
         app._show_snackbar("Removed from queue", ft.Colors.ORANGE)
         _render_current_page(app)
 
@@ -377,6 +388,8 @@ def _add_all_pending_to_queue(app):
         if paper["arnumber"] not in app.download_queue:
             app.download_queue.append(paper["arnumber"])
             added += 1
+    if added > 0:
+        app._save_queue()  # Persist queue
     app._show_snackbar(f"Added {added} papers to queue", ft.Colors.INDIGO)
     _render_current_page(app)
 
@@ -385,17 +398,30 @@ def _clear_queue(app):
     """Clear the download queue."""
     count = len(app.download_queue)
     app.download_queue.clear()
+    app.queue_auto_start = False  # Reset auto-start flag
+    app._save_queue()  # Persist queue
     app._show_snackbar(f"Cleared {count} papers from queue", ft.Colors.ORANGE)
     _render_current_page(app)
 
 
 def _start_queue_download(app):
     """Start downloading papers from the queue."""
-    if app.is_downloading:
-        app._show_snackbar("A download is already in progress", ft.Colors.ORANGE)
-        return
     if not app.download_queue:
         app._show_snackbar("Queue is empty", ft.Colors.ORANGE)
+        return
+    
+    if app.is_downloading:
+        # Set flag to auto-start queue after current download finishes
+        app.queue_auto_start = True
+        # Update queue badge to show pending state
+        if hasattr(app, 'queue_badge'):
+            app.queue_badge.bgcolor = ft.Colors.BLUE
+            app.queue_badge.tooltip = "Queue will start after current download"
+        app._show_snackbar(
+            f"✓ Queue ({len(app.download_queue)} papers) scheduled - will start after current download", 
+            ft.Colors.BLUE
+        )
+        app.page.update()
         return
     
     # Switch to download view and start queue download
@@ -418,15 +444,18 @@ def _show_queue_dialog(app):
     def move_up(idx):
         if idx > 0:
             app.download_queue[idx], app.download_queue[idx-1] = app.download_queue[idx-1], app.download_queue[idx]
+            app._save_queue()  # Persist queue
             _rebuild_queue_list()
     
     def move_down(idx):
         if idx < len(app.download_queue) - 1:
             app.download_queue[idx], app.download_queue[idx+1] = app.download_queue[idx+1], app.download_queue[idx]
+            app._save_queue()  # Persist queue
             _rebuild_queue_list()
     
     def remove_item(arnumber):
         app.download_queue.remove(arnumber)
+        app._save_queue()  # Persist queue
         _rebuild_queue_list()
     
     def _rebuild_queue_list():
