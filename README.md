@@ -6,8 +6,9 @@
 
 ## 功能特性
 
+### 核心功能
 - **双模式支持**：命令行 (CLI) 和图形界面 (GUI)
-- **Material Design GUI**：基于 Flet/Flutter 的现代化界面
+- **Material Design 3 GUI**：基于 Flet/Flutter 的现代化界面
 - 支持 Edge / Chrome 浏览器（Linux/macOS 推荐 Chrome）
 - 多种登录方式：手动登录、凭证登录、复用已登录的浏览器
 - **连接已运行的浏览器**（推荐）：复用已登录的 Chrome/Edge 会话
@@ -15,7 +16,19 @@
 - 自动分页下载，支持断点续传
 - **SQLite 数据库管理**：论文记录、任务历史、统计信息
 - **智能跳过无权限论文**：自动检测并跳过无访问权限的论文
-- 下载失败自动重试（最多 3 次）
+- 下载失败自动重试（可配置重试次数和间隔）
+
+### GUI 特色功能
+- **深色/浅色主题切换**：支持深色模式，保护眼睛
+- **下载完成系统通知**：Windows/macOS/Linux 原生通知
+- **论文详情查看**：显示标题、作者、摘要、文件信息
+- **单篇论文重试下载**：针对失败的论文单独重试
+- **搜索历史**：保存最近 20 条搜索记录，快速重复搜索
+- **批量操作**：重试所有失败、删除指定状态、导出可见论文
+- **任务管理**：查看任务详情、编辑任务状态、重置失败/跳过的论文
+- **日志导出**：导出下载日志用于调试
+- **即时停止**：点击停止按钮可立即中断下载（无需等待超时）
+- **PDF 缓存**：缓存文件列表避免重复扫描
 
 ## 安装
 
@@ -141,6 +154,36 @@ python -m src --query "test" --user-data-dir "./selenium_profile" --download-dir
 python -m src --query "deep learning" --user-data-dir "./selenium_profile" --download-dir ./downloads
 ```
 
+## GUI 使用说明
+
+### 主界面
+
+- **Download**：下载页面，配置搜索条件和浏览器设置
+- **Papers**：论文库，管理已下载的论文
+- **Tasks**：任务历史，查看和管理下载任务
+- **Settings**：设置页面，配置主题、重试策略等
+
+### 下载流程
+
+1. 选择搜索方式（关键词或 URL）
+2. 配置浏览器设置（推荐使用"连接已运行的浏览器"）
+3. 点击 "Launch Browser" 启动调试模式浏览器（或手动启动）
+4. 在浏览器中登录 IEEE Xplore
+5. 点击 "Start Download" 开始下载
+6. 可随时点击 "Stop Download" 立即停止
+
+### 论文管理
+
+- 点击论文卡片查看详情（标题、作者、摘要、文件信息）
+- 使用筛选器按状态过滤论文
+- 批量操作：重试失败、删除、导出
+
+### 任务管理
+
+- 查看任务详情和统计信息
+- 编辑任务状态
+- 重置失败/跳过的论文为待下载状态
+
 ## CLI 参数
 
 ```bash
@@ -149,6 +192,7 @@ python -m src --help
 
 | 参数 | 说明 |
 |------|------|
+| `--gui` | 启动图形界面 |
 | `--query` | 搜索关键词 |
 | `--search-url` | IEEE 搜索结果页 URL（保留筛选条件） |
 | `--year-from`, `--year-to` | 年份范围（仅 `--query` 模式） |
@@ -156,7 +200,7 @@ python -m src --help
 | `--download-dir` | 下载目录 |
 | `--browser` | 浏览器类型：`edge`（默认）或 `chrome` |
 | `--debugger-address` | 连接已运行的浏览器（如 `127.0.0.1:9222`） |
-| `--user-data-dir` | 浏览器配置文件目录（详见下方说明） |
+| `--user-data-dir` | 浏览器配置文件目录 |
 | `--headless` | 无界面模式 |
 | `-v`, `--verbose` | 显示详细进度 |
 | `--debug` | 显示调试日志 |
@@ -170,69 +214,20 @@ python -m src --help
 | `--migrate-jsonl` | 从旧版 JSONL 迁移到数据库 |
 | `--tasks` | 显示最近的下载任务 |
 
-### 关于 `--user-data-dir`
-
-浏览器配置文件目录包含登录状态、cookies、扩展等。有两种使用方式：
-
-**方式 A：创建新的配置目录（推荐用于调试模式）**
-
-```bash
-# 创建一个新的空目录，浏览器会在其中创建新的配置文件
---user-data-dir="./selenium_profile"
-```
-
-**方式 B：复用现有浏览器配置（包含已登录的会话）**
-
-浏览器默认配置目录位置：
-
-| 浏览器 | 操作系统 | 默认路径 |
-|--------|----------|----------|
-| Chrome | Windows | `C:\Users\<用户名>\AppData\Local\Google\Chrome\User Data` |
-| Chrome | macOS | `~/Library/Application Support/Google/Chrome` |
-| Chrome | Linux | `~/.config/google-chrome` |
-| Edge | Windows | `C:\Users\<用户名>\AppData\Local\Microsoft\Edge\User Data` |
-| Edge | macOS | `~/Library/Application Support/Microsoft Edge` |
-| Edge | Linux | `~/.config/microsoft-edge` |
-
-> ⚠️ **注意**：直接使用默认配置目录可能与正在运行的浏览器冲突。建议复制一份或使用调试模式连接已运行的浏览器。
-
-**复用已有配置示例：**
-
-```bash
-# Windows - 复用 Chrome 默认配置（确保 Chrome 已关闭）
-python -m src --query "test" --user-data-dir "C:\Users\你的用户名\AppData\Local\Google\Chrome\User Data" --download-dir ./downloads
-
-# Linux - 复用 Chrome 配置
-python -m src --query "test" --user-data-dir ~/.config/google-chrome --download-dir ./downloads
-```
-
 ## 输出文件
 
 下载目录中包含：
 
-- `*.pdf`：下载的论文 PDF
+- `*.pdf`：下载的论文 PDF（以论文标题命名）
 - `papers.db`：SQLite 数据库（论文记录和下载任务）
 - `download_state.jsonl`：旧版状态记录（兼容）
 
 ## 数据库功能
 
-工具使用 SQLite 数据库管理下载记录，支持以下功能：
-
 ### 查看统计信息
 
 ```bash
 python -m src --download-dir ./downloads --stats
-```
-
-输出示例：
-```
-=== Download Statistics ===
-  Total papers:    150
-  Downloaded:      120
-  Skipped:         25
-  Failed:          5
-  Pending:         0
-  Total size:      450.5 MB
 ```
 
 ### 列出论文
@@ -267,41 +262,6 @@ python -m src --download-dir ./downloads --export json
 python -m src --download-dir ./downloads --export csv
 ```
 
-### 查看下载任务历史
-
-```bash
-python -m src --download-dir ./downloads --tasks
-```
-
-### 从旧版迁移
-
-如果之前使用过 JSONL 格式：
-
-```bash
-python -m src --download-dir ./downloads --migrate-jsonl
-```
-
-## 特性说明
-
-### 智能跳过无权限论文
-
-工具会自动检测以下情况并跳过：
-- 页面显示 "access denied"、"purchase pdf" 等提示
-- 需要额外购买或订阅的论文
-
-跳过的论文会记录在 `download_state.jsonl` 中，状态为 `skipped`。
-
-### 下载重试机制
-
-- 网络错误、超时等情况会自动重试（最多 3 次）
-- 无权限错误不会重试，直接跳过
-
-### 多种下载策略
-
-1. 先尝试直接 PDF URL（最快）
-2. 失败则加载 stamp 页面，检测 iframe/embed
-3. 尝试点击下载按钮
-
 ## 常见问题
 
 ### 端口连接失败
@@ -327,15 +287,13 @@ Test-NetConnection -ComputerName 127.0.0.1 -Port 9222
 
 ### 下载超时
 
-- 增加 `--per-download-timeout` 值
+- 增加 `--per-download-timeout` 值（GUI 中在 Settings 页面配置）
 - 减小 `--max-results` 分批下载
 - 检查网络连接
 
-### 找不到论文
+### 停止按钮无响应
 
-- 确认搜索条件正确
-- 使用 `-v` 查看详细日志
-- 使用 `--debug` 查看调试信息
+已修复：现在点击停止按钮会立即中断下载，无需等待超时。
 
 ### ChromeDriver 版本不匹配
 
@@ -354,9 +312,11 @@ src/
 ├── __init__.py
 ├── __main__.py
 ├── cli.py              # CLI 入口
+├── gui.py              # GUI 界面（Flet/Material Design 3）
+├── database.py         # SQLite 数据库管理
 ├── ieee_xplore.py      # IEEE Xplore 自动化逻辑
 ├── selenium_utils.py   # WebDriver 工具函数
-└── state.py            # 状态管理
+└── state.py            # 状态管理（旧版兼容）
 ```
 
 ## 法律声明

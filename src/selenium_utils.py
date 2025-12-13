@@ -75,6 +75,16 @@ def connect_to_existing_browser(
     except Exception:
         pass
     
+    # Try to disable PDF viewer via CDP (Chrome 109+)
+    try:
+        # This sets the preference to download PDFs instead of viewing inline
+        driver.execute_cdp_cmd(
+            "Emulation.setUserAgentOverride",
+            {"userAgent": driver.execute_script("return navigator.userAgent")}
+        )
+    except Exception:
+        pass
+    
     logger.info(f"Connected to browser successfully!")
     return driver
 
@@ -140,11 +150,17 @@ def wait_for_document_ready(driver: WebDriver, timeout_seconds: float = 30) -> N
     )
 
 
+class StopRequestedException(Exception):
+    """Exception raised when stop is requested during download."""
+    pass
+
+
 def wait_for_pdf_download(
     download_dir: Path,
     started_at: float,
     timeout_seconds: float,
     known_files: Optional[Set[str]] = None,
+    stop_check: Optional[callable] = None,
 ) -> Path:
     """Wait for a new PDF file to appear in download_dir.
     
@@ -153,6 +169,7 @@ def wait_for_pdf_download(
         started_at: Timestamp when download was initiated
         timeout_seconds: Max time to wait
         known_files: Set of filenames that existed before download started
+        stop_check: Optional callable that returns True if stop is requested
     """
     if known_files is None:
         known_files = set()
@@ -161,6 +178,10 @@ def wait_for_pdf_download(
     last_log_time = 0.0
     
     while time.time() < deadline:
+        # Check if stop is requested
+        if stop_check and stop_check():
+            raise StopRequestedException("Download stopped by user request")
+        
         try:
             all_files = list(download_dir.iterdir())
         except Exception as e:

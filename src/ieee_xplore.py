@@ -12,7 +12,7 @@ from selenium.webdriver.remote.webdriver import WebDriver
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.support.ui import WebDriverWait
 
-from .selenium_utils import safe_rename, wait_for_document_ready, wait_for_pdf_download
+from .selenium_utils import safe_rename, wait_for_document_ready, wait_for_pdf_download, StopRequestedException
 from .state import append_state_record, load_downloaded_arnumbers
 from .database import PapersDatabase
 
@@ -54,6 +54,7 @@ class IeeeXploreDownloader:
         per_download_timeout_seconds: float,
         sleep_between_downloads_seconds: float,
         database: Optional[PapersDatabase] = None,
+        stop_check: Optional[callable] = None,
     ) -> None:
         self._driver = driver
         self._download_dir = download_dir
@@ -61,6 +62,7 @@ class IeeeXploreDownloader:
         self._per_download_timeout_seconds = per_download_timeout_seconds
         self._sleep_between_downloads_seconds = sleep_between_downloads_seconds
         self._db = database
+        self._stop_check = stop_check
 
     def manual_login(self) -> None:
         self._driver.get("https://ieeexplore.ieee.org/Xplore/home.jsp")
@@ -406,6 +408,13 @@ class IeeeXploreDownloader:
         self._driver.get(direct_pdf_url)
         time.sleep(3)
         
+        # Check if PDF is displayed inline (browser PDF viewer) - try to trigger download
+        current_url = self._driver.current_url
+        if "ielx" in current_url or current_url.endswith(".pdf") or "getPDF" in current_url:
+            logger.debug("PDF displayed inline, triggering download...")
+            self._try_trigger_pdf_download(arnumber)
+            time.sleep(2)
+        
         # Check if PDF started downloading
         try:
             downloaded = wait_for_pdf_download(
@@ -413,6 +422,7 @@ class IeeeXploreDownloader:
                 started_at=start_ts,
                 timeout_seconds=15,
                 known_files=before_files,
+                stop_check=self._stop_check,
             )
             return downloaded
         except TimeoutError:
@@ -449,12 +459,29 @@ class IeeeXploreDownloader:
             # Check if PDF is displayed inline (browser PDF viewer)
             # If so, try to trigger actual download
             self._try_trigger_pdf_download(arnumber)
+            
+            # Check if download started after trigger
+            try:
+                downloaded = wait_for_pdf_download(
+                    download_dir=self._download_dir,
+                    started_at=start_ts,
+                    timeout_seconds=10,
+                    known_files=before_files,
+                    stop_check=self._stop_check,
+                )
+                return downloaded
+            except TimeoutError:
+                logger.debug("Download not started after trigger, trying alternative methods")
+                # Try alternative: navigate back to stamp page and use click strategies
+                self._driver.get(f"https://ieeexplore.ieee.org/stamp/stamp.jsp?tp=&arnumber={arnumber}")
+                time.sleep(2)
         else:
             logger.debug("No PDF source found, trying click strategies")
-            # Try clicking download buttons
-            if not self._try_click_pdf_buttons():
-                # Try switching to iframe and clicking there
-                self._try_iframe_download()
+        
+        # Try clicking download buttons
+        if not self._try_click_pdf_buttons():
+            # Try switching to iframe and clicking there
+            self._try_iframe_download()
         
         # Wait for download to complete
         downloaded = wait_for_pdf_download(
@@ -462,6 +489,7 @@ class IeeeXploreDownloader:
             started_at=start_ts,
             timeout_seconds=self._per_download_timeout_seconds,
             known_files=before_files,
+            stop_check=self._stop_check,
         )
         return downloaded
     
@@ -470,8 +498,39 @@ class IeeeXploreDownloader:
         current_url = self._driver.current_url
         
         # Check if we're viewing a PDF inline
-        if "getPDF" in current_url or current_url.endswith(".pdf"):
+        if "getPDF" in current_url or current_url.endswith(".pdf") or "ielx" in current_url:
             logger.debug("PDF displayed inline, trying to trigger download...")
+            
+            # Method 0: Use CDP to download the URL directly (most reliable)
+            try:
+                # Use fetch to download the PDF
+                self._driver.execute_cdp_cmd(
+                    "Page.setDownloadBehavior",
+                    {
+                        "behavior": "allow",
+                        "downloadPath": str(self._download_dir),
+                    },
+                )
+                # Trigger download via CDP
+                self._driver.execute_script("""
+                    fetch(arguments[0])
+                        .then(response => response.blob())
+                        .then(blob => {
+                            var url = window.URL.createObjectURL(blob);
+                            var a = document.createElement('a');
+                            a.href = url;
+                            a.download = arguments[1] + '.pdf';
+                            document.body.appendChild(a);
+                            a.click();
+                            window.URL.revokeObjectURL(url);
+                            a.remove();
+                        });
+                """, current_url, arnumber)
+                logger.debug("Triggered download via fetch API")
+                time.sleep(3)
+                return
+            except Exception as e:
+                logger.debug(f"Fetch download failed: {e}")
             
             # Method 1: Use JavaScript to create download link
             try:
@@ -491,7 +550,6 @@ class IeeeXploreDownloader:
             
             # Method 2: Use Ctrl+S keyboard shortcut
             try:
-                from selenium.webdriver.common.keys import Keys
                 from selenium.webdriver.common.action_chains import ActionChains
                 actions = ActionChains(self._driver)
                 actions.key_down(Keys.CONTROL).send_keys('s').key_up(Keys.CONTROL).perform()

@@ -17,7 +17,7 @@ SETTINGS_FILE = "settings.json"
 
 from .database import PapersDatabase
 from .ieee_xplore import IeeeXploreDownloader
-from .selenium_utils import connect_to_existing_browser, create_driver
+from .selenium_utils import connect_to_existing_browser, create_driver, StopRequestedException
 
 logger = logging.getLogger(__name__)
 
@@ -75,8 +75,30 @@ class PaperDownloaderApp:
         self.download_dir = Path(self.settings.get("download_dir", str(Path.cwd() / "downloads")))
         self.current_view = "download"
         
+        # Apply saved theme
+        saved_theme = self.settings.get("theme_mode", "light")
+        if saved_theme == "dark":
+            self.page.theme_mode = ft.ThemeMode.DARK
+            self.page.bgcolor = ft.Colors.GREY_900
+        
         # Build UI
         self._build_ui()
+
+    def _is_dark_mode(self) -> bool:
+        """Check if dark mode is enabled."""
+        return self.page.theme_mode == ft.ThemeMode.DARK
+
+    def _get_theme_colors(self) -> dict:
+        """Get theme-aware colors."""
+        is_dark = self._is_dark_mode()
+        return {
+            "bg": ft.Colors.GREY_900 if is_dark else ft.Colors.WHITE,
+            "card_bg": ft.Colors.GREY_800 if is_dark else ft.Colors.WHITE,
+            "surface": ft.Colors.GREY_800 if is_dark else ft.Colors.GREY_50,
+            "text": ft.Colors.WHITE if is_dark else ft.Colors.GREY_900,
+            "text_secondary": ft.Colors.GREY_400 if is_dark else ft.Colors.GREY_600,
+            "border": ft.Colors.GREY_700 if is_dark else ft.Colors.GREY_200,
+        }
 
     def _get_settings_path(self) -> Path:
         """Get settings file path."""
@@ -111,6 +133,7 @@ class PaperDownloaderApp:
             "search_type": self.search_type.value,
             "search_query": self.query_input.value,
             "search_url": self.url_input.value,
+            "theme_mode": "dark" if self.page.theme_mode == ft.ThemeMode.DARK else "light",
         }
         try:
             with open(self._get_settings_path(), "w", encoding="utf-8") as f:
@@ -121,20 +144,22 @@ class PaperDownloaderApp:
 
     def _build_ui(self):
         """Build the main UI layout."""
+        is_dark = self.page.theme_mode == ft.ThemeMode.DARK
+        
         # Navigation Rail with modern styling (includes leading logo)
         self.nav_rail = ft.NavigationRail(
             selected_index=0,
             label_type=ft.NavigationRailLabelType.ALL,
             min_width=90,
             min_extended_width=200,
-            bgcolor=ft.Colors.WHITE,
-            indicator_color=ft.Colors.INDIGO_100,
+            bgcolor=ft.Colors.GREY_800 if is_dark else ft.Colors.WHITE,
+            indicator_color=ft.Colors.INDIGO_700 if is_dark else ft.Colors.INDIGO_100,
             indicator_shape=ft.RoundedRectangleBorder(radius=12),
             leading=ft.Container(
                 content=ft.Column([
-                    ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=28, color=ft.Colors.INDIGO),
-                    ft.Text("IEEE", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.INDIGO),
-                    ft.Text("Downloader", size=8, color=ft.Colors.GREY_600),
+                    ft.Icon(ft.Icons.CLOUD_DOWNLOAD, size=28, color=ft.Colors.INDIGO_300 if is_dark else ft.Colors.INDIGO),
+                    ft.Text("IEEE", size=10, weight=ft.FontWeight.BOLD, color=ft.Colors.INDIGO_300 if is_dark else ft.Colors.INDIGO),
+                    ft.Text("Downloader", size=8, color=ft.Colors.GREY_400 if is_dark else ft.Colors.GREY_600),
                 ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=1),
                 padding=ft.padding.only(top=10, bottom=15),
             ),
@@ -178,7 +203,7 @@ class PaperDownloaderApp:
             content=self._download_view,
             expand=True,
             padding=30,
-            bgcolor=ft.Colors.WHITE,
+            bgcolor=ft.Colors.GREY_900 if is_dark else ft.Colors.WHITE,
             border_radius=ft.border_radius.only(top_left=24, bottom_left=24),
             shadow=ft.BoxShadow(
                 spread_radius=0,
@@ -189,9 +214,10 @@ class PaperDownloaderApp:
         )
 
         # Sidebar with navigation rail
-        sidebar = ft.Container(
+        is_dark = self.page.theme_mode == ft.ThemeMode.DARK
+        self.sidebar = ft.Container(
             content=self.nav_rail,
-            bgcolor=ft.Colors.WHITE,
+            bgcolor=ft.Colors.GREY_800 if is_dark else ft.Colors.WHITE,
             width=90,
         )
 
@@ -199,7 +225,7 @@ class PaperDownloaderApp:
         self.page.add(
             ft.Row(
                 [
-                    sidebar,
+                    self.sidebar,
                     self.content,
                 ],
                 expand=True,
@@ -244,7 +270,10 @@ class PaperDownloaderApp:
             ]),
         )
 
-        # Query input - load from settings
+        # Search history
+        search_history = self.settings.get("search_history", [])
+        
+        # Query input with history dropdown
         self.query_input = ft.TextField(
             label="Search Keywords",
             value=self.settings.get("search_query", ""),
@@ -255,8 +284,29 @@ class PaperDownloaderApp:
             filled=True,
             prefix_icon=ft.Icons.SEARCH,
         )
+        
+        # History dropdown for queries
+        query_history = [h for h in search_history if h.get("type") == "query"]
+        query_menu_items = [
+            ft.PopupMenuItem(
+                text=h["value"][:50] + ("..." if len(h["value"]) > 50 else ""),
+                on_click=lambda e, v=h["value"]: self._select_history(v, "query"),
+            ) for h in query_history[:10]
+        ]
+        if query_history:
+            query_menu_items.append(ft.PopupMenuItem())  # Divider
+            query_menu_items.append(ft.PopupMenuItem(text="Clear History", icon=ft.Icons.DELETE, on_click=self._clear_search_history))
+        else:
+            query_menu_items.append(ft.PopupMenuItem(text="No history yet", disabled=True))
+        
+        self.query_history_dropdown = ft.PopupMenuButton(
+            icon=ft.Icons.HISTORY,
+            tooltip="Search History",
+            visible=(saved_search_type == "query"),
+            items=query_menu_items,
+        )
 
-        # URL input - load from settings
+        # URL input with history dropdown
         self.url_input = ft.TextField(
             label="IEEE Search URL",
             value=self.settings.get("search_url", ""),
@@ -267,11 +317,35 @@ class PaperDownloaderApp:
             filled=True,
             prefix_icon=ft.Icons.LINK,
         )
+        
+        # History dropdown for URLs
+        url_history = [h for h in search_history if h.get("type") == "url"]
+        url_menu_items = [
+            ft.PopupMenuItem(
+                text=h["value"][:60] + ("..." if len(h["value"]) > 60 else ""),
+                on_click=lambda e, v=h["value"]: self._select_history(v, "url"),
+            ) for h in url_history[:10]
+        ]
+        if url_history:
+            url_menu_items.append(ft.PopupMenuItem())  # Divider
+            url_menu_items.append(ft.PopupMenuItem(text="Clear History", icon=ft.Icons.DELETE, on_click=self._clear_search_history))
+        else:
+            url_menu_items.append(ft.PopupMenuItem(text="No history yet", disabled=True))
+        
+        self.url_history_dropdown = ft.PopupMenuButton(
+            icon=ft.Icons.HISTORY,
+            tooltip="URL History",
+            visible=(saved_search_type == "url"),
+            items=url_menu_items,
+        )
 
         def on_search_type_change(e):
             is_query = self.search_type.value == "query"
             self.query_input.visible = is_query
             self.url_input.visible = not is_query
+            # Update history button visibility
+            self.query_history_dropdown.visible = is_query
+            self.url_history_dropdown.visible = not is_query
             self.page.update()
 
         self.search_type.on_change = on_search_type_change
@@ -492,8 +566,8 @@ class PaperDownloaderApp:
                                     ft.Container(height=12),
                                     self.search_type,
                                     ft.Container(height=8),
-                                    self.query_input,
-                                    self.url_input,
+                                    ft.Row([self.query_input, self.query_history_dropdown], spacing=5),
+                                    ft.Row([self.url_input, self.url_history_dropdown], spacing=5),
                                 ], spacing=8),
                                 padding=20,
                             ),
@@ -571,6 +645,13 @@ class PaperDownloaderApp:
                                         section_header(ft.Icons.TERMINAL, "Progress & Logs", ft.Colors.GREEN),
                                         ft.Container(expand=True),
                                         ft.IconButton(
+                                            icon=ft.Icons.FILE_DOWNLOAD,
+                                            tooltip="Export logs",
+                                            icon_size=18,
+                                            icon_color=ft.Colors.GREY_500,
+                                            on_click=self._export_logs,
+                                        ),
+                                        ft.IconButton(
                                             icon=ft.Icons.CLEAR_ALL,
                                             tooltip="Clear log",
                                             icon_size=18,
@@ -640,41 +721,70 @@ class PaperDownloaderApp:
         # Refresh list and stats
         self._refresh_papers_list()
 
+        colors = self._get_theme_colors()
+        
         return ft.Column([
             # Page header
             ft.Container(
                 content=ft.Row([
                     ft.Icon(ft.Icons.LIBRARY_BOOKS, size=32, color=ft.Colors.INDIGO),
                     ft.Column([
-                        ft.Text("Papers Library", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_900),
-                        ft.Text("Manage your downloaded papers collection", size=13, color=ft.Colors.GREY_600),
+                        ft.Text("Papers Library", size=24, weight=ft.FontWeight.BOLD, color=colors["text"]),
+                        ft.Text("Manage your downloaded papers collection", size=13, color=colors["text_secondary"]),
                     ], spacing=2),
                 ], spacing=15),
                 margin=ft.margin.only(bottom=15),
             ),
             self.papers_stats_row,
             ft.Container(height=10),
-            # Filter bar
+            # Filter bar with batch actions
             ft.Container(
                 content=ft.Row([
                     self.paper_filter,
                     self.paper_search,
                     ft.Container(expand=True),
+                    ft.PopupMenuButton(
+                        icon=ft.Icons.MORE_VERT,
+                        tooltip="Batch Actions",
+                        items=[
+                            ft.PopupMenuItem(
+                                text="Retry All Failed",
+                                icon=ft.Icons.REFRESH,
+                                on_click=lambda e: self._batch_retry_failed(),
+                            ),
+                            ft.PopupMenuItem(
+                                text="Delete All Failed",
+                                icon=ft.Icons.DELETE,
+                                on_click=lambda e: self._batch_delete_by_status("failed"),
+                            ),
+                            ft.PopupMenuItem(
+                                text="Delete All Pending",
+                                icon=ft.Icons.DELETE_SWEEP,
+                                on_click=lambda e: self._batch_delete_by_status("pending"),
+                            ),
+                            ft.PopupMenuItem(),  # Divider
+                            ft.PopupMenuItem(
+                                text="Export Visible to CSV",
+                                icon=ft.Icons.FILE_DOWNLOAD,
+                                on_click=lambda e: self._export_visible_papers(),
+                            ),
+                        ],
+                    ),
                     ft.IconButton(
                         icon=ft.Icons.REFRESH,
                         on_click=lambda e: self._refresh_papers_list(),
                         tooltip="Refresh",
-                        icon_color=ft.Colors.GREY_600,
+                        icon_color=colors["text_secondary"],
                     ),
-                ], spacing=15),
+                ], spacing=10),
                 padding=ft.padding.symmetric(vertical=10),
             ),
             # Papers list
             ft.Container(
                 content=self.papers_list,
                 expand=True,
-                bgcolor=ft.Colors.GREY_50,
-                border=ft.border.all(1, ft.Colors.GREY_200),
+                bgcolor=colors["surface"],
+                border=ft.border.all(1, colors["border"]),
                 border_radius=12,
                 padding=12,
             ),
@@ -682,13 +792,14 @@ class PaperDownloaderApp:
 
     def _stat_chip(self, label: str, value: int, color):
         """Create a stat chip with modern styling."""
+        colors = self._get_theme_colors()
         return ft.Container(
             content=ft.Column([
                 ft.Text(str(value), size=20, weight=ft.FontWeight.BOLD, color=color),
-                ft.Text(label, size=11, color=ft.Colors.GREY_600),
+                ft.Text(label, size=11, color=colors["text_secondary"]),
             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
             padding=ft.padding.symmetric(horizontal=16, vertical=10),
-            bgcolor=ft.Colors.with_opacity(0.08, color),
+            bgcolor=ft.Colors.with_opacity(0.15 if self._is_dark_mode() else 0.08, color),
             border_radius=12,
         )
 
@@ -698,21 +809,12 @@ class PaperDownloaderApp:
         if not self.db:
             return
 
-        # Auto-scan for missing file info (quick scan, only for downloaded papers without file info)
+        # Auto-scan for missing file info (synchronous to avoid SQLite threading issues)
         if auto_scan:
             self._quick_scan_file_info()
 
         # Update stats row
-        stats = self.db.get_stats() if self.db else {}
-        if hasattr(self, 'papers_stats_row'):
-            self.papers_stats_row.controls = [
-                self._stat_chip("Total", stats.get("total", 0), ft.Colors.BLUE),
-                self._stat_chip("Downloaded", stats.get("downloaded", 0), ft.Colors.GREEN),
-                self._stat_chip("Skipped", stats.get("skipped", 0), ft.Colors.ORANGE),
-                self._stat_chip("Failed", stats.get("failed", 0), ft.Colors.RED),
-                ft.Container(expand=True),
-                ft.Text(f"{stats.get('total_size_mb', 0)} MB total", size=12, color=ft.Colors.GREY_600),
-            ]
+        self._update_papers_stats()
 
         self.papers_list.controls.clear()
 
@@ -735,7 +837,6 @@ class PaperDownloaderApp:
             )
 
         for paper in papers[:100]:  # Limit to 100 for performance
-            arnumber = paper["arnumber"]
             self.papers_list.controls.append(self._build_paper_card(paper))
 
         if not papers:
@@ -756,8 +857,30 @@ class PaperDownloaderApp:
 
         self.page.update()
 
+    def _update_papers_stats(self):
+        """Update the papers stats row."""
+        stats = self.db.get_stats() if self.db else {}
+        colors = self._get_theme_colors()
+        if hasattr(self, 'papers_stats_row'):
+            self.papers_stats_row.controls = [
+                self._stat_chip("Total", stats.get("total", 0), ft.Colors.BLUE),
+                self._stat_chip("Downloaded", stats.get("downloaded", 0), ft.Colors.GREEN),
+                self._stat_chip("Skipped", stats.get("skipped", 0), ft.Colors.ORANGE),
+                self._stat_chip("Failed", stats.get("failed", 0), ft.Colors.RED),
+                self._stat_chip("Pending", stats.get("pending", 0), ft.Colors.GREY),
+                ft.Container(expand=True),
+                ft.Text(f"{stats.get('total_size_mb', 0)} MB total", size=12, color=colors["text_secondary"]),
+            ]
+            try:
+                self.page.update()
+            except:
+                pass
+
     def _build_paper_card(self, paper: dict) -> ft.Control:
         """Build a card for a single paper with detailed info."""
+        colors = self._get_theme_colors()
+        is_dark = self._is_dark_mode()
+        
         arnumber = paper["arnumber"]
         title = paper["title"] or "Unknown Title"
         status = paper["status"]
@@ -812,8 +935,18 @@ class PaperDownloaderApp:
         if updated_at:
             subtitle_parts.append(str(updated_at)[:16])
 
+        # Dark mode aware status background
+        status_bg = {
+            "downloaded": ft.Colors.GREEN_900 if is_dark else ft.Colors.GREEN_50,
+            "skipped": ft.Colors.ORANGE_900 if is_dark else ft.Colors.ORANGE_50,
+            "failed": ft.Colors.RED_900 if is_dark else ft.Colors.RED_50,
+            "pending": ft.Colors.GREY_800 if is_dark else ft.Colors.GREY_100,
+            "downloading": ft.Colors.BLUE_900 if is_dark else ft.Colors.BLUE_50,
+        }.get(status, ft.Colors.GREY_800 if is_dark else ft.Colors.GREY_100)
+
         return ft.Card(
             elevation=1,
+            color=colors["card_bg"],
             content=ft.Container(
                 content=ft.Row(
                     [
@@ -822,7 +955,7 @@ class PaperDownloaderApp:
                             content=ft.Icon(
                                 status_config["icon"], color=status_config["color"], size=28
                             ),
-                            bgcolor=status_config["bg"],
+                            bgcolor=status_bg,
                             padding=10,
                             border_radius=8,
                         ),
@@ -835,11 +968,12 @@ class PaperDownloaderApp:
                                     weight=ft.FontWeight.W_500,
                                     max_lines=2,
                                     overflow=ft.TextOverflow.ELLIPSIS,
+                                    color=colors["text"],
                                 ),
                                 ft.Text(
                                     " | ".join(subtitle_parts),
                                     size=11,
-                                    color=ft.Colors.GREY_600,
+                                    color=colors["text_secondary"],
                                 ),
                                 # Show error message if failed
                                 ft.Text(
@@ -900,6 +1034,9 @@ class PaperDownloaderApp:
             self._show_snackbar("Paper not found", ft.Colors.RED)
             return
 
+        # Get theme colors
+        colors = self._get_theme_colors()
+
         status_config = {
             "downloaded": {"color": ft.Colors.GREEN, "label": "Downloaded"},
             "skipped": {"color": ft.Colors.ORANGE, "label": "Skipped"},
@@ -915,12 +1052,10 @@ class PaperDownloaderApp:
         file_size = paper.get("file_size")
         
         if not file_path and paper["status"] == "downloaded":
-            # Try to find the file in download directory (by arnumber or title)
             found_file = self._find_paper_file(arnumber, paper.get("title"))
             if found_file:
                 file_path = str(found_file)
                 file_size = found_file.stat().st_size
-                # Update database with found file info
                 self.db.update_paper_status(
                     arnumber, 
                     status="downloaded",
@@ -936,20 +1071,31 @@ class PaperDownloaderApp:
             else:
                 size_text = f"{file_size / 1024:.2f} KB"
 
+        # Parse authors
+        authors_text = "N/A"
+        if paper.get("authors"):
+            try:
+                authors = json.loads(paper["authors"]) if isinstance(paper["authors"], str) else paper["authors"]
+                if authors:
+                    authors_text = ", ".join(authors[:5])
+                    if len(authors) > 5:
+                        authors_text += f" (+{len(authors) - 5} more)"
+            except:
+                authors_text = str(paper["authors"])
+
+        # Get abstract
+        abstract_text = paper.get("abstract") or ""
+
         def close_dialog(e):
             dialog.open = False
             self.page.update()
 
         def open_file(e):
-            # Use the potentially updated file_path from above
             fp = file_path
             if fp and Path(fp).exists():
-                import subprocess
-                import platform as pf
-
-                if pf.system() == "Windows":
+                if platform.system() == "Windows":
                     subprocess.run(["start", "", fp], shell=True)
-                elif pf.system() == "Darwin":
+                elif platform.system() == "Darwin":
                     subprocess.run(["open", fp])
                 else:
                     subprocess.run(["xdg-open", fp])
@@ -957,46 +1103,77 @@ class PaperDownloaderApp:
                 self._show_snackbar("File not found", ft.Colors.RED)
 
         def open_folder(e):
-            # Use the potentially updated file_path from above
             fp = file_path
             if fp:
                 folder = Path(fp).parent
                 if folder.exists():
-                    import subprocess
-                    import platform as pf
-
-                    if pf.system() == "Windows":
+                    if platform.system() == "Windows":
                         subprocess.run(["explorer", str(folder)])
-                    elif pf.system() == "Darwin":
+                    elif platform.system() == "Darwin":
                         subprocess.run(["open", str(folder)])
                     else:
                         subprocess.run(["xdg-open", str(folder)])
                 else:
                     self._show_snackbar("Folder not found", ft.Colors.RED)
 
+        def retry_download(e):
+            dialog.open = False
+            self.page.update()
+            self._retry_single_paper(arnumber)
+
+        # Can retry if not currently downloading and paper is pending/failed/skipped
+        can_retry = not self.is_downloading and paper["status"] in ("pending", "failed", "skipped")
+
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text("Paper Details", weight=ft.FontWeight.BOLD),
+            title=ft.Text("Paper Details", weight=ft.FontWeight.BOLD, color=colors["text"]),
+            bgcolor=colors["bg"],
             content=ft.Container(
                 content=ft.Column(
                     [
                         # Title
-                        ft.Text("Title", size=12, color=ft.Colors.GREY_600),
+                        ft.Text("Title", size=12, color=colors["text_secondary"]),
                         ft.Text(
                             paper["title"],
                             size=14,
                             weight=ft.FontWeight.W_500,
                             selectable=True,
+                            color=colors["text"],
                         ),
                         ft.Divider(height=15),
+                        # Authors (if available)
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Authors", size=12, color=colors["text_secondary"]),
+                                ft.Text(authors_text, size=12, selectable=True, color=colors["text"]),
+                            ], spacing=4),
+                            visible=authors_text != "N/A",
+                        ),
+                        # Abstract (if available)
+                        ft.Container(
+                            content=ft.Column([
+                                ft.Text("Abstract", size=12, color=colors["text_secondary"]),
+                                ft.Container(
+                                    content=ft.Text(
+                                        abstract_text[:500] + ("..." if len(abstract_text) > 500 else ""),
+                                        size=11,
+                                        selectable=True,
+                                        color=colors["text"],
+                                    ),
+                                    bgcolor=colors["surface"],
+                                    padding=10,
+                                    border_radius=5,
+                                ),
+                            ], spacing=4),
+                            visible=bool(abstract_text),
+                        ),
+                        ft.Divider(height=15) if authors_text != "N/A" or abstract_text else ft.Container(),
                         # Status and ID row
                         ft.Row(
                             [
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "Status", size=12, color=ft.Colors.GREY_600
-                                        ),
+                                        ft.Text("Status", size=12, color=colors["text_secondary"]),
                                         ft.Container(
                                             content=ft.Text(
                                                 status_config["label"],
@@ -1004,9 +1181,7 @@ class PaperDownloaderApp:
                                                 size=12,
                                             ),
                                             bgcolor=status_config["color"],
-                                            padding=ft.padding.symmetric(
-                                                horizontal=10, vertical=4
-                                            ),
+                                            padding=ft.padding.symmetric(horizontal=10, vertical=4),
                                             border_radius=12,
                                         ),
                                     ],
@@ -1014,25 +1189,15 @@ class PaperDownloaderApp:
                                 ),
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "AR Number", size=12, color=ft.Colors.GREY_600
-                                        ),
-                                        ft.Text(
-                                            paper["arnumber"],
-                                            size=14,
-                                            selectable=True,
-                                        ),
+                                        ft.Text("AR Number", size=12, color=colors["text_secondary"]),
+                                        ft.Text(paper["arnumber"], size=14, selectable=True, color=colors["text"]),
                                     ],
                                     spacing=4,
                                 ),
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "Task ID", size=12, color=ft.Colors.GREY_600
-                                        ),
-                                        ft.Text(
-                                            str(paper.get("task_id") or "N/A"), size=14
-                                        ),
+                                        ft.Text("Task ID", size=12, color=colors["text_secondary"]),
+                                        ft.Text(str(paper.get("task_id") or "N/A"), size=14, color=colors["text"]),
                                     ],
                                     spacing=4,
                                 ),
@@ -1041,23 +1206,19 @@ class PaperDownloaderApp:
                         ),
                         ft.Divider(height=15),
                         # File info
-                        ft.Text("File Information", size=12, color=ft.Colors.GREY_600),
+                        ft.Text("File Information", size=12, color=colors["text_secondary"]),
                         ft.Row(
                             [
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "File Size", size=11, color=ft.Colors.GREY_500
-                                        ),
-                                        ft.Text(size_text, size=13),
+                                        ft.Text("File Size", size=11, color=colors["text_secondary"]),
+                                        ft.Text(size_text, size=13, color=colors["text"]),
                                     ],
                                     spacing=2,
                                 ),
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "File Path", size=11, color=ft.Colors.GREY_500
-                                        ),
+                                        ft.Text("File Path", size=11, color=colors["text_secondary"]),
                                         ft.Text(
                                             file_path or "N/A",
                                             size=11,
@@ -1065,6 +1226,7 @@ class PaperDownloaderApp:
                                             width=300,
                                             max_lines=2,
                                             overflow=ft.TextOverflow.ELLIPSIS,
+                                            color=colors["text"],
                                         ),
                                     ],
                                     spacing=2,
@@ -1078,17 +1240,15 @@ class PaperDownloaderApp:
                             content=ft.Column(
                                 [
                                     ft.Divider(height=15),
-                                    ft.Text(
-                                        "Error Message", size=12, color=ft.Colors.RED_400
-                                    ),
+                                    ft.Text("Error Message", size=12, color=ft.Colors.RED_400),
                                     ft.Container(
                                         content=ft.Text(
                                             paper.get("error_message") or "",
                                             size=12,
-                                            color=ft.Colors.RED_700,
+                                            color=ft.Colors.RED_300 if self._is_dark_mode() else ft.Colors.RED_700,
                                             selectable=True,
                                         ),
-                                        bgcolor=ft.Colors.RED_50,
+                                        bgcolor=ft.Colors.RED_900 if self._is_dark_mode() else ft.Colors.RED_50,
                                         padding=10,
                                         border_radius=5,
                                     ),
@@ -1102,25 +1262,15 @@ class PaperDownloaderApp:
                             [
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "Created", size=11, color=ft.Colors.GREY_500
-                                        ),
-                                        ft.Text(
-                                            str(paper.get("created_at") or "N/A")[:19],
-                                            size=12,
-                                        ),
+                                        ft.Text("Created", size=11, color=colors["text_secondary"]),
+                                        ft.Text(str(paper.get("created_at") or "N/A")[:19], size=12, color=colors["text"]),
                                     ],
                                     spacing=2,
                                 ),
                                 ft.Column(
                                     [
-                                        ft.Text(
-                                            "Updated", size=11, color=ft.Colors.GREY_500
-                                        ),
-                                        ft.Text(
-                                            str(paper.get("updated_at") or "N/A")[:19],
-                                            size=12,
-                                        ),
+                                        ft.Text("Updated", size=11, color=colors["text_secondary"]),
+                                        ft.Text(str(paper.get("updated_at") or "N/A")[:19], size=12, color=colors["text"]),
                                     ],
                                     spacing=2,
                                 ),
@@ -1131,10 +1281,16 @@ class PaperDownloaderApp:
                     spacing=5,
                     scroll=ft.ScrollMode.AUTO,
                 ),
-                width=500,
-                height=400,
+                width=550,
+                height=450,
             ),
             actions=[
+                ft.TextButton(
+                    "Retry Download",
+                    icon=ft.Icons.REFRESH,
+                    on_click=retry_download,
+                    visible=can_retry,
+                ),
                 ft.TextButton(
                     "Open File",
                     icon=ft.Icons.FILE_OPEN,
@@ -1169,6 +1325,9 @@ class PaperDownloaderApp:
         if not paper:
             self._show_snackbar("Paper not found", ft.Colors.RED)
             return
+
+        # Get theme colors
+        colors = self._get_theme_colors()
 
         status_dropdown = ft.Dropdown(
             label="Status",
@@ -1217,7 +1376,8 @@ class PaperDownloaderApp:
 
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text("Edit Paper", weight=ft.FontWeight.BOLD),
+            title=ft.Text("Edit Paper", weight=ft.FontWeight.BOLD, color=colors["text"]),
+            bgcolor=colors["bg"],
             content=ft.Container(
                 content=ft.Column(
                     [
@@ -1226,9 +1386,9 @@ class PaperDownloaderApp:
                             if len(paper["title"]) > 80
                             else paper["title"],
                             size=13,
-                            color=ft.Colors.GREY_700,
+                            color=colors["text"],
                         ),
-                        ft.Text(f"AR Number: {arnumber}", size=12, color=ft.Colors.GREY_500),
+                        ft.Text(f"AR Number: {arnumber}", size=12, color=colors["text_secondary"]),
                         ft.Divider(height=20),
                         status_dropdown,
                         ft.Container(height=10),
@@ -1473,21 +1633,23 @@ class PaperDownloaderApp:
             self._stat_chip("Error", error_count, ft.Colors.RED),
         ], spacing=12)
 
+        colors = self._get_theme_colors()
+        
         return ft.Column([
             # Page header
             ft.Container(
                 content=ft.Row([
                     ft.Icon(ft.Icons.TASK_ALT, size=32, color=ft.Colors.INDIGO),
                     ft.Column([
-                        ft.Text("Download Tasks", size=24, weight=ft.FontWeight.BOLD, color=ft.Colors.GREY_900),
-                        ft.Text("View and manage your download history", size=13, color=ft.Colors.GREY_600),
+                        ft.Text("Download Tasks", size=24, weight=ft.FontWeight.BOLD, color=colors["text"]),
+                        ft.Text("View and manage your download history", size=13, color=colors["text_secondary"]),
                     ], spacing=2),
                     ft.Container(expand=True),
                     ft.IconButton(
                         icon=ft.Icons.REFRESH,
                         tooltip="Refresh",
                         on_click=lambda e: self._refresh_tasks_view(),
-                        icon_color=ft.Colors.GREY_600,
+                        icon_color=colors["text_secondary"],
                     ),
                 ], spacing=15),
                 margin=ft.margin.only(bottom=15),
@@ -1505,7 +1667,7 @@ class PaperDownloaderApp:
             ft.Container(
                 content=tasks_list,
                 expand=True,
-                bgcolor=ft.Colors.GREY_50,
+                bgcolor=colors["surface"],
                 border_radius=12,
                 padding=12,
             ),
@@ -1545,6 +1707,39 @@ class PaperDownloaderApp:
             on_change=on_sleep_between_change,
         )
 
+        # Retry settings
+        def on_max_retries_change(e):
+            self.settings["max_retries"] = int(self.max_retries_field.value or "3")
+            self._save_settings()
+
+        def on_retry_delay_change(e):
+            self.settings["retry_delay"] = int(self.retry_delay_field.value or "5")
+            self._save_settings()
+
+        self.max_retries_field = ft.TextField(
+            value=str(self.settings.get("max_retries", 3)),
+            width=80,
+            text_align=ft.TextAlign.CENTER,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            on_change=on_max_retries_change,
+        )
+
+        self.retry_delay_field = ft.TextField(
+            value=str(self.settings.get("retry_delay", 5)),
+            width=80,
+            suffix_text="sec",
+            text_align=ft.TextAlign.CENTER,
+            keyboard_type=ft.KeyboardType.NUMBER,
+            on_change=on_retry_delay_change,
+        )
+
+        # Theme toggle
+        is_dark = self.page.theme_mode == ft.ThemeMode.DARK
+        self.theme_switch = ft.Switch(
+            value=is_dark,
+            on_change=self._toggle_theme,
+        )
+
         # Helper for section headers
         def settings_section(icon, title, color=ft.Colors.INDIGO):
             return ft.Row([
@@ -1573,6 +1768,27 @@ class PaperDownloaderApp:
             # Scrollable content
             ft.ListView(
                 controls=[
+                    # Appearance card
+                    ft.Card(
+                        elevation=1,
+                        surface_tint_color=ft.Colors.PURPLE,
+                        content=ft.Container(
+                            content=ft.Column([
+                                settings_section(ft.Icons.PALETTE, "Appearance", ft.Colors.PURPLE),
+                                ft.Container(height=15),
+                                ft.Row([
+                                    ft.Column([
+                                        ft.Text("Dark Mode", size=12, color=ft.Colors.GREY_600),
+                                        ft.Text("Switch between light and dark theme", size=10, color=ft.Colors.GREY_500),
+                                    ], spacing=3),
+                                    ft.Container(expand=True),
+                                    self.theme_switch,
+                                ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                            ], spacing=5),
+                            padding=24,
+                        ),
+                    ),
+                    
                     # Download settings card
                     ft.Card(
                         elevation=1,
@@ -1594,6 +1810,26 @@ class PaperDownloaderApp:
                                         ft.Text("Delay between each download", size=10, color=ft.Colors.GREY_500),
                                         ft.Container(height=5),
                                         self.sleep_between_field,
+                                    ], spacing=3),
+                                ], spacing=30),
+                                ft.Container(height=15),
+                                ft.Divider(height=1),
+                                ft.Container(height=15),
+                                settings_section(ft.Icons.REPLAY, "Retry Strategy", ft.Colors.ORANGE),
+                                ft.Container(height=15),
+                                ft.Row([
+                                    ft.Column([
+                                        ft.Text("Max Retries", size=12, color=ft.Colors.GREY_600),
+                                        ft.Text("Retry attempts per paper", size=10, color=ft.Colors.GREY_500),
+                                        ft.Container(height=5),
+                                        self.max_retries_field,
+                                    ], spacing=3),
+                                    ft.Container(width=40),
+                                    ft.Column([
+                                        ft.Text("Retry Delay", size=12, color=ft.Colors.GREY_600),
+                                        ft.Text("Wait time between retries", size=10, color=ft.Colors.GREY_500),
+                                        ft.Container(height=5),
+                                        self.retry_delay_field,
                                     ], spacing=3),
                                 ], spacing=30),
                             ], spacing=5),
@@ -1750,35 +1986,60 @@ class PaperDownloaderApp:
             else:
                 return "microsoft-edge"
 
+    def _get_pdf_cache(self) -> dict:
+        """Get or build PDF file cache. Returns {filename_lower: Path}."""
+        cache_attr = '_pdf_file_cache'
+        cache_time_attr = '_pdf_cache_time'
+        
+        # Invalidate cache after 30 seconds
+        now = time.time()
+        if (hasattr(self, cache_attr) and hasattr(self, cache_time_attr) 
+            and now - getattr(self, cache_time_attr) < 30):
+            return getattr(self, cache_attr)
+        
+        # Build cache
+        cache = {}
+        if self.download_dir.exists():
+            for pdf_file in self.download_dir.glob("*.pdf"):
+                cache[pdf_file.stem.lower()] = pdf_file
+        
+        setattr(self, cache_attr, cache)
+        setattr(self, cache_time_attr, now)
+        return cache
+
+    def _invalidate_pdf_cache(self):
+        """Invalidate the PDF file cache."""
+        if hasattr(self, '_pdf_file_cache'):
+            delattr(self, '_pdf_file_cache')
+        if hasattr(self, '_pdf_cache_time'):
+            delattr(self, '_pdf_cache_time')
+
     def _find_paper_file(self, arnumber: str, title: str = None) -> Optional[Path]:
         """Try to find a downloaded PDF file for the given arnumber or title."""
         if not self.download_dir.exists():
             return None
         
+        pdf_cache = self._get_pdf_cache()
+        
         # Look for files matching the arnumber pattern
-        for pdf_file in self.download_dir.glob("*.pdf"):
-            # Check if filename starts with arnumber
-            if pdf_file.name.startswith(arnumber):
-                return pdf_file
-            # Also check if arnumber is in the filename
-            if arnumber in pdf_file.name:
+        for filename_lower, pdf_file in pdf_cache.items():
+            if filename_lower.startswith(arnumber) or arnumber in filename_lower:
                 return pdf_file
         
         # If title is provided, try to match by title
         if title:
-            # Normalize title for comparison (IEEE uses underscores for spaces)
-            title_normalized = title.replace(" ", "_").replace(":", "").replace("/", "_")
-            title_words = [w.lower() for w in title.split()[:5] if len(w) > 2]  # First 5 significant words
+            title_normalized = title.replace(" ", "_").replace(":", "").replace("/", "_").lower()
+            title_words = [w.lower() for w in title.split()[:5] if len(w) > 2]
             
-            for pdf_file in self.download_dir.glob("*.pdf"):
-                filename_lower = pdf_file.stem.lower()
-                # Check if title matches (with underscores)
-                if title_normalized.lower() in filename_lower or filename_lower in title_normalized.lower():
+            for filename_lower, pdf_file in pdf_cache.items():
+                # Check if title matches
+                if title_normalized in filename_lower or filename_lower in title_normalized:
                     return pdf_file
                 # Check if most title words are in filename
-                matches = sum(1 for w in title_words if w in filename_lower)
-                if len(title_words) > 0 and matches >= len(title_words) * 0.6:
-                    return pdf_file
+                if title_words:
+                    matches = sum(1 for w in title_words if w in filename_lower)
+                    if matches >= len(title_words) * 0.6:
+                        return pdf_file
         
         return None
 
@@ -1838,6 +2099,12 @@ class PaperDownloaderApp:
         if self.search_type.value == "url" and not self.url_input.value.strip():
             self._show_snackbar("Please enter a search URL", ft.Colors.RED)
             return
+
+        # Add to search history
+        if self.search_type.value == "query":
+            self._add_to_search_history(self.query_input.value.strip(), "query")
+        else:
+            self._add_to_search_history(self.url_input.value.strip(), "url")
 
         # Reset flags
         self.is_downloading = True
@@ -1951,6 +2218,7 @@ class PaperDownloaderApp:
                 per_download_timeout_seconds=per_download_timeout_seconds,
                 sleep_between_downloads_seconds=sleep_between_downloads_seconds,
                 database=self.db,
+                stop_check=lambda: self.stop_requested,
             )
 
             # Check stop before collecting papers
@@ -2104,6 +2372,12 @@ class PaperDownloaderApp:
                     self._log_styled("Download interrupted", "warning")
                     self.db.complete_task(task_id, status="interrupted")
                     break
+                
+                except StopRequestedException:
+                    self._log_styled("Download stopped by user", "warning")
+                    self.db.update_paper_status(arnumber, status="pending")
+                    self.db.complete_task(task_id, status="interrupted")
+                    break
                     
                 except PermissionError as ex:
                     # No access - mark as skipped, not failed
@@ -2137,6 +2411,11 @@ class PaperDownloaderApp:
                 # Loop completed without break
                 self.db.complete_task(task_id, status="completed")
                 self._log_styled("✓ Download complete!", "success")
+                # Send notification
+                self._send_notification(
+                    "Download Complete",
+                    f"Downloaded {downloaded_count} papers, {skipped_count} skipped, {failed_count} failed"
+                )
 
         except Exception as ex:
             self._log_styled(f"Error: {ex}", "error")
@@ -2237,6 +2516,112 @@ class PaperDownloaderApp:
         count = self.db.export_to_csv(output_path)
         self._show_snackbar(f"Exported {count} papers to {output_path}")
 
+    def _batch_retry_failed(self):
+        """Retry all failed papers."""
+        if self.is_downloading:
+            self._show_snackbar("A download is already in progress", ft.Colors.ORANGE)
+            return
+        
+        self._init_db()
+        failed_papers = self.db.get_papers_by_status("failed")
+        if not failed_papers:
+            self._show_snackbar("No failed papers to retry", ft.Colors.ORANGE)
+            return
+        
+        # Reset all failed papers to pending
+        for paper in failed_papers:
+            self.db.update_paper_status(paper["arnumber"], status="pending", error_message=None)
+        
+        self._show_snackbar(f"Reset {len(failed_papers)} failed papers to pending", ft.Colors.GREEN)
+        self._refresh_papers_list(auto_scan=False)
+
+    def _batch_delete_by_status(self, status: str):
+        """Delete all papers with given status."""
+        self._init_db()
+        papers = self.db.get_papers_by_status(status)
+        if not papers:
+            self._show_snackbar(f"No {status} papers to delete", ft.Colors.ORANGE)
+            return
+        
+        count = 0
+        for paper in papers:
+            try:
+                self.db._conn.execute("DELETE FROM papers WHERE arnumber = ?", (paper["arnumber"],))
+                count += 1
+            except:
+                pass
+        self.db._conn.commit()
+        
+        self._show_snackbar(f"Deleted {count} {status} papers", ft.Colors.GREEN)
+        self._refresh_papers_list(auto_scan=False)
+
+    def _export_visible_papers(self):
+        """Export currently visible papers to CSV."""
+        import csv
+        
+        self._init_db()
+        status = self.paper_filter.value if self.paper_filter.value != "all" else None
+        keyword = self.paper_search.value.strip() if self.paper_search.value else None
+        
+        if keyword:
+            papers = self.db.search_papers(keyword)
+            if status:
+                papers = [p for p in papers if p["status"] == status]
+        elif status:
+            papers = self.db.get_papers_by_status(status)
+        else:
+            papers = []
+            for s in ["downloaded", "skipped", "failed", "pending"]:
+                papers.extend(self.db.get_papers_by_status(s))
+        
+        if not papers:
+            self._show_snackbar("No papers to export", ft.Colors.ORANGE)
+            return
+        
+        output_path = self.download_dir / f"papers_filtered_{int(time.time())}.csv"
+        with open(output_path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["arnumber", "title", "status", "file_path", "file_size", "created_at"])
+            for p in papers:
+                writer.writerow([
+                    p["arnumber"], p["title"], p["status"],
+                    p.get("file_path", ""), p.get("file_size", ""),
+                    p.get("created_at", "")
+                ])
+        
+        self._show_snackbar(f"Exported {len(papers)} papers to {output_path.name}", ft.Colors.GREEN)
+
+    def _export_logs(self, e):
+        """Export download logs to file."""
+        log_content = []
+        try:
+            for control in self.log_view.controls:
+                # Try to extract text from various control structures
+                if hasattr(control, 'content'):
+                    content = control.content
+                    if hasattr(content, 'controls'):
+                        for c in content.controls:
+                            if isinstance(c, ft.Text) and c.value:
+                                log_content.append(str(c.value))
+                    elif isinstance(content, ft.Text) and content.value:
+                        log_content.append(str(content.value))
+                elif isinstance(control, ft.Text) and control.value:
+                    log_content.append(str(control.value))
+        except Exception as ex:
+            logger.debug(f"Error extracting logs: {ex}")
+        
+        if not log_content:
+            self._show_snackbar("No logs to export", ft.Colors.ORANGE)
+            return
+        
+        try:
+            output_path = self.download_dir / f"download_log_{int(time.time())}.txt"
+            with open(output_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(log_content))
+            self._show_snackbar(f"Logs exported to {output_path.name}", ft.Colors.GREEN)
+        except Exception as ex:
+            self._show_snackbar(f"Failed to export logs: {ex}", ft.Colors.RED)
+
     def _migrate_jsonl(self, e):
         """Migrate from JSONL."""
         self._init_db()
@@ -2335,6 +2720,118 @@ class PaperDownloaderApp:
         self.page.snack_bar.open = True
         self.page.update()
 
+    def _toggle_theme(self, e):
+        """Toggle between light and dark theme."""
+        is_dark = e.control.value
+        
+        if is_dark:
+            self.page.theme_mode = ft.ThemeMode.DARK
+            self.page.bgcolor = ft.Colors.GREY_900
+        else:
+            self.page.theme_mode = ft.ThemeMode.LIGHT
+            self.page.bgcolor = ft.Colors.GREY_50
+        
+        # Save theme preference
+        self.settings["theme_mode"] = "dark" if is_dark else "light"
+        self._save_settings()
+        
+        # Update navigation rail colors
+        if hasattr(self, 'nav_rail'):
+            self.nav_rail.bgcolor = ft.Colors.GREY_800 if is_dark else ft.Colors.WHITE
+        
+        # Update sidebar colors
+        if hasattr(self, 'sidebar'):
+            self.sidebar.bgcolor = ft.Colors.GREY_800 if is_dark else ft.Colors.WHITE
+        
+        # Update content area
+        if hasattr(self, 'content'):
+            self.content.bgcolor = ft.Colors.GREY_900 if is_dark else ft.Colors.WHITE
+        
+        # Clear cached views to rebuild with new theme
+        self._download_view = self._build_download_view()
+        self._papers_view = None
+        self._tasks_view = None
+        self._settings_view = self._build_settings_view()
+        
+        # Stay on settings page after theme change
+        self.content.content = self._settings_view
+        
+        self.page.update()
+
+    def _select_history(self, value: str, search_type: str):
+        """Select a search history item."""
+        if search_type == "query":
+            self.query_input.value = value
+        else:
+            self.url_input.value = value
+        self.page.update()
+
+    def _clear_search_history(self, e):
+        """Clear search history."""
+        self.settings["search_history"] = []
+        self._save_settings()
+        self._show_snackbar("Search history cleared", ft.Colors.GREEN)
+        # Rebuild download view to update history dropdowns
+        self._download_view = self._build_download_view()
+        self.content.content = self._download_view
+        self.page.update()
+
+    def _add_to_search_history(self, value: str, search_type: str):
+        """Add a search to history."""
+        if not value.strip():
+            return
+        
+        history = self.settings.get("search_history", [])
+        
+        # Remove duplicate if exists
+        history = [h for h in history if not (h.get("type") == search_type and h.get("value") == value)]
+        
+        # Add to beginning
+        history.insert(0, {"type": search_type, "value": value, "time": time.time()})
+        
+        # Keep only last 20 items
+        history = history[:20]
+        
+        self.settings["search_history"] = history
+        self._save_settings()
+
+    def _send_notification(self, title: str, message: str):
+        """Send a system notification (Windows toast notification)."""
+        try:
+            if platform.system() == "Windows":
+                # Use PowerShell to show Windows toast notification
+                ps_script = f'''
+                [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null
+                [Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null
+                $template = @"
+                <toast>
+                    <visual>
+                        <binding template="ToastText02">
+                            <text id="1">{title}</text>
+                            <text id="2">{message}</text>
+                        </binding>
+                    </visual>
+                </toast>
+"@
+                $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
+                $xml.LoadXml($template)
+                $toast = [Windows.UI.Notifications.ToastNotification]::new($xml)
+                [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("IEEE Paper Downloader").Show($toast)
+                '''
+                subprocess.run(["powershell", "-Command", ps_script], 
+                             capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+            elif platform.system() == "Darwin":
+                # macOS notification
+                subprocess.run([
+                    "osascript", "-e",
+                    f'display notification "{message}" with title "{title}"'
+                ])
+            else:
+                # Linux notification (requires notify-send)
+                subprocess.run(["notify-send", title, message])
+        except Exception as ex:
+            logger.debug(f"Failed to send notification: {ex}")
+
     def _resume_task(self, query: str, search_url: str, auto_start: bool = False):
         """Resume an interrupted task by switching to download view with pre-filled query."""
         # Don't resume if already downloading
@@ -2406,6 +2903,105 @@ class PaperDownloaderApp:
             logger.exception("Retry failed handler error")
             self._show_snackbar(f"Retry Failed error: {ex}", ft.Colors.RED)
 
+    def _retry_single_paper(self, arnumber: str):
+        """Retry downloading a single paper."""
+        if self.is_downloading:
+            self._show_snackbar("A download is already in progress", ft.Colors.ORANGE)
+            return
+
+        if not self.db:
+            self._init_db()
+
+        paper = self.db.get_paper(arnumber)
+        if not paper:
+            self._show_snackbar("Paper not found", ft.Colors.RED)
+            return
+
+        # Reset paper to pending
+        self.db.update_paper_status(arnumber, status="pending", error_message=None)
+        
+        # Start download in background thread
+        def download_single():
+            try:
+                self._init_db()
+                self.download_dir.mkdir(parents=True, exist_ok=True)
+                
+                self._log_styled(f"Retrying download: {paper['title'][:50]}...", "info")
+                
+                # Connect to browser
+                try:
+                    self.driver = connect_to_existing_browser(
+                        download_dir=self.download_dir,
+                        debugger_address=self.debugger_address.value,
+                        browser=self.browser_dropdown.value,
+                    )
+                except Exception as ex:
+                    self._log_styled(f"Failed to connect to browser: {ex}", "error")
+                    self.db.update_paper_status(arnumber, status="failed", error_message=str(ex))
+                    self._download_finished()
+                    return
+
+                # Create downloader
+                try:
+                    timeout = float(str(self.per_download_timeout or "300").strip())
+                except:
+                    timeout = 300.0
+
+                self.downloader = IeeeXploreDownloader(
+                    driver=self.driver,
+                    download_dir=self.download_dir,
+                    state_file=self.download_dir / "download_state.jsonl",
+                    per_download_timeout_seconds=timeout,
+                    sleep_between_downloads_seconds=1,
+                    database=self.db,
+                    stop_check=lambda: self.stop_requested,
+                )
+
+                # Mark as downloading
+                self.db.update_paper_status(arnumber, status="downloading")
+                
+                # Download
+                downloaded_file = self.downloader._download_pdf_by_arnumber(arnumber)
+                
+                # Update status
+                if downloaded_file and downloaded_file.exists():
+                    self.db.update_paper_status(
+                        arnumber,
+                        status="downloaded",
+                        file_path=str(downloaded_file),
+                        file_size=downloaded_file.stat().st_size,
+                    )
+                    self._log_styled(f"✓ Downloaded: {arnumber}", "success")
+                    self._send_notification("Download Complete", f"Downloaded: {paper['title'][:50]}...")
+                else:
+                    self.db.update_paper_status(arnumber, status="failed", error_message="Download failed")
+                    self._log_styled(f"✗ Download failed: {arnumber}", "error")
+
+            except StopRequestedException:
+                self.db.update_paper_status(arnumber, status="pending")
+                self._log_styled(f"Download stopped by user", "warning")
+            except PermissionError as ex:
+                self.db.update_paper_status(arnumber, status="skipped", error_message=str(ex))
+                self._log_styled(f"⊘ No access: {arnumber}", "skip")
+            except Exception as ex:
+                self.db.update_paper_status(arnumber, status="failed", error_message=str(ex))
+                self._log_styled(f"✗ Error: {ex}", "error")
+            finally:
+                self._download_finished()
+                # Refresh papers list if on papers view
+                if self.current_view == "papers":
+                    self._refresh_papers_list(auto_scan=False)
+
+        self.is_downloading = True
+        self.start_button.visible = False
+        self.stop_button.visible = True
+        self.progress_bar.visible = True
+        self.progress_text.value = f"Downloading: {paper['title'][:50]}..."
+        self.page.update()
+
+        self.download_thread = threading.Thread(target=download_single, daemon=True)
+        self.download_thread.start()
+
     def _delete_task(self, task_id: int):
         """Delete a task from the database."""
         if not self.db:
@@ -2434,6 +3030,9 @@ class PaperDownloaderApp:
         if not task:
             self._show_snackbar("Task not found", ft.Colors.RED)
             return
+
+        # Get theme colors
+        colors = self._get_theme_colors()
 
         status_config = {
             "completed": {"color": ft.Colors.GREEN, "label": "Completed"},
@@ -2480,18 +3079,19 @@ class PaperDownloaderApp:
                             paper["title"][:60] + "..." if len(paper["title"]) > 60 else paper["title"],
                             size=12,
                             expand=True,
+                            color=colors["text"],
                         ),
                         ft.Text(p_status, size=10, color=p_color),
                     ], spacing=8),
                     padding=ft.padding.symmetric(horizontal=8, vertical=4),
                     border_radius=4,
-                    bgcolor=ft.Colors.WHITE,
+                    bgcolor=colors["card_bg"],
                 )
             )
         
         if not task_papers:
             papers_list.controls.append(
-                ft.Text("No papers in this task", color=ft.Colors.GREY_500, size=12)
+                ft.Text("No papers in this task", color=colors["text_secondary"], size=12)
             )
 
         # Calculate stats
@@ -2502,13 +3102,14 @@ class PaperDownloaderApp:
 
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text(f"Task #{task_id} Details", weight=ft.FontWeight.BOLD),
+            title=ft.Text(f"Task #{task_id} Details", weight=ft.FontWeight.BOLD, color=colors["text"]),
+            bgcolor=colors["bg"],
             content=ft.Container(
                 content=ft.Column([
                     # Status row
                     ft.Row([
                         ft.Column([
-                            ft.Text("Status", size=12, color=ft.Colors.GREY_600),
+                            ft.Text("Status", size=12, color=colors["text_secondary"]),
                             ft.Container(
                                 content=ft.Text(status_config["label"], color=ft.Colors.WHITE, size=12),
                                 bgcolor=status_config["color"],
@@ -2517,60 +3118,61 @@ class PaperDownloaderApp:
                             ),
                         ], spacing=4),
                         ft.Column([
-                            ft.Text("Max Results", size=12, color=ft.Colors.GREY_600),
-                            ft.Text(str(task.get("max_results") or "N/A"), size=14),
+                            ft.Text("Max Results", size=12, color=colors["text_secondary"]),
+                            ft.Text(str(task.get("max_results") or "N/A"), size=14, color=colors["text"]),
                         ], spacing=4),
                         ft.Column([
-                            ft.Text("Total Found", size=12, color=ft.Colors.GREY_600),
-                            ft.Text(str(total), size=14),
+                            ft.Text("Total Found", size=12, color=colors["text_secondary"]),
+                            ft.Text(str(total), size=14, color=colors["text"]),
                         ], spacing=4),
                     ], spacing=30),
                     ft.Divider(height=15),
                     
                     # Query/URL
-                    ft.Text("Search Query/URL", size=12, color=ft.Colors.GREY_600),
+                    ft.Text("Search Query/URL", size=12, color=colors["text_secondary"]),
                     ft.Container(
                         content=ft.Text(
                             task.get("query") or task.get("search_url") or "N/A",
                             size=12,
                             selectable=True,
+                            color=colors["text"],
                         ),
-                        bgcolor=ft.Colors.GREY_100,
+                        bgcolor=colors["surface"],
                         padding=10,
                         border_radius=5,
                     ),
                     ft.Divider(height=15),
                     
                     # Stats
-                    ft.Text("Download Statistics", size=12, color=ft.Colors.GREY_600),
+                    ft.Text("Download Statistics", size=12, color=colors["text_secondary"]),
                     ft.Row([
                         ft.Container(
                             content=ft.Column([
                                 ft.Text(str(downloaded), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.GREEN),
-                                ft.Text("Downloaded", size=10, color=ft.Colors.GREY_600),
+                                ft.Text("Downloaded", size=10, color=colors["text_secondary"]),
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                             padding=10,
-                            border=ft.border.all(1, ft.Colors.GREEN_200),
+                            border=ft.border.all(1, ft.Colors.GREEN_700 if self._is_dark_mode() else ft.Colors.GREEN_200),
                             border_radius=8,
                             expand=True,
                         ),
                         ft.Container(
                             content=ft.Column([
                                 ft.Text(str(skipped), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.ORANGE),
-                                ft.Text("Skipped", size=10, color=ft.Colors.GREY_600),
+                                ft.Text("Skipped", size=10, color=colors["text_secondary"]),
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                             padding=10,
-                            border=ft.border.all(1, ft.Colors.ORANGE_200),
+                            border=ft.border.all(1, ft.Colors.ORANGE_700 if self._is_dark_mode() else ft.Colors.ORANGE_200),
                             border_radius=8,
                             expand=True,
                         ),
                         ft.Container(
                             content=ft.Column([
                                 ft.Text(str(failed), size=20, weight=ft.FontWeight.BOLD, color=ft.Colors.RED),
-                                ft.Text("Failed", size=10, color=ft.Colors.GREY_600),
+                                ft.Text("Failed", size=10, color=colors["text_secondary"]),
                             ], horizontal_alignment=ft.CrossAxisAlignment.CENTER, spacing=2),
                             padding=10,
-                            border=ft.border.all(1, ft.Colors.RED_200),
+                            border=ft.border.all(1, ft.Colors.RED_700 if self._is_dark_mode() else ft.Colors.RED_200),
                             border_radius=8,
                             expand=True,
                         ),
@@ -2580,22 +3182,22 @@ class PaperDownloaderApp:
                     # Timestamps
                     ft.Row([
                         ft.Column([
-                            ft.Text("Created", size=11, color=ft.Colors.GREY_500),
-                            ft.Text(str(task.get("created_at") or "N/A")[:19], size=12),
+                            ft.Text("Created", size=11, color=colors["text_secondary"]),
+                            ft.Text(str(task.get("created_at") or "N/A")[:19], size=12, color=colors["text"]),
                         ], spacing=2),
                         ft.Column([
-                            ft.Text("Completed", size=11, color=ft.Colors.GREY_500),
-                            ft.Text(str(task.get("completed_at") or "N/A")[:19], size=12),
+                            ft.Text("Completed", size=11, color=colors["text_secondary"]),
+                            ft.Text(str(task.get("completed_at") or "N/A")[:19], size=12, color=colors["text"]),
                         ], spacing=2),
                     ], spacing=30),
                     ft.Divider(height=15),
                     
                     # Papers list
-                    ft.Text(f"Papers ({len(task_papers)})", size=12, color=ft.Colors.GREY_600),
+                    ft.Text(f"Papers ({len(task_papers)})", size=12, color=colors["text_secondary"]),
                     ft.Container(
                         content=papers_list,
-                        bgcolor=ft.Colors.GREY_50,
-                        border=ft.border.all(1, ft.Colors.GREY_200),
+                        bgcolor=colors["surface"],
+                        border=ft.border.all(1, colors["border"]),
                         border_radius=5,
                         padding=5,
                     ),
@@ -2630,6 +3232,9 @@ class PaperDownloaderApp:
         if not task:
             self._show_snackbar("Task not found", ft.Colors.RED)
             return
+
+        # Get theme colors
+        colors = self._get_theme_colors()
 
         status_dropdown = ft.Dropdown(
             label="Status",
@@ -2694,15 +3299,16 @@ class PaperDownloaderApp:
 
         dialog = ft.AlertDialog(
             modal=True,
-            title=ft.Text(f"Edit Task #{task_id}", weight=ft.FontWeight.BOLD),
+            title=ft.Text(f"Edit Task #{task_id}", weight=ft.FontWeight.BOLD, color=colors["text"]),
+            bgcolor=colors["bg"],
             content=ft.Container(
                 content=ft.Column([
                     # Query/URL display
-                    ft.Text("Search Query/URL", size=12, color=ft.Colors.GREY_600),
+                    ft.Text("Search Query/URL", size=12, color=colors["text_secondary"]),
                     ft.Text(
                         (task.get("query") or task.get("search_url") or "N/A")[:80],
                         size=12,
-                        color=ft.Colors.GREY_700,
+                        color=colors["text"],
                     ),
                     ft.Divider(height=20),
                     
@@ -2711,7 +3317,7 @@ class PaperDownloaderApp:
                     ft.Container(height=15),
                     
                     # Action buttons
-                    ft.Text("Batch Actions", size=12, color=ft.Colors.GREY_600),
+                    ft.Text("Batch Actions", size=12, color=colors["text_secondary"]),
                     ft.Row([
                         ft.ElevatedButton(
                             f"Reset {failed_count} Failed",
