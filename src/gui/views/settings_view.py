@@ -41,6 +41,10 @@ def build_settings_view(app):
         app.settings["retry_delay"] = int(app.retry_delay_field.value or "5")
         app._save_settings()
 
+    def on_hourly_quota_change(e):
+        app.settings["hourly_quota"] = int(app.hourly_quota_field.value or "100")
+        app._save_settings()
+
     app.max_retries_field = ft.TextField(
         value=str(app.settings.get("max_retries", 3)),
         width=80,
@@ -56,6 +60,15 @@ def build_settings_view(app):
         text_align=ft.TextAlign.CENTER,
         keyboard_type=ft.KeyboardType.NUMBER,
         on_change=on_retry_delay_change,
+    )
+
+    app.hourly_quota_field = ft.TextField(
+        value=str(app.settings.get("hourly_quota", 100)),
+        width=80,
+        suffix_text="/hr",
+        text_align=ft.TextAlign.CENTER,
+        keyboard_type=ft.KeyboardType.NUMBER,
+        on_change=on_hourly_quota_change,
     )
 
     is_dark = app.page.theme_mode == ft.ThemeMode.DARK
@@ -144,6 +157,33 @@ def build_settings_view(app):
                                     app.retry_delay_field,
                                 ], spacing=3),
                             ], spacing=30),
+                            ft.Container(height=15),
+                            ft.Divider(height=1),
+                            ft.Container(height=15),
+                            settings_section(ft.Icons.SPEED, "Rate Limiting", ft.Colors.RED),
+                            ft.Container(height=15),
+                            ft.Row([
+                                ft.Column([
+                                    ft.Text("Hourly Quota", size=12, color=ft.Colors.GREY_600),
+                                    ft.Text("Max downloads per hour", size=10, color=ft.Colors.GREY_500),
+                                    ft.Container(height=5),
+                                    app.hourly_quota_field,
+                                ], spacing=3),
+                                ft.Container(width=40),
+                                ft.Column([
+                                    ft.Text("Adaptive Delay", size=12, color=ft.Colors.GREY_600),
+                                    ft.Text("Auto-adjusts based on success rate", size=10, color=ft.Colors.GREY_500),
+                                    ft.Container(height=5),
+                                    ft.Text("✓ Enabled", size=12, color=ft.Colors.GREEN),
+                                ], spacing=3),
+                            ], spacing=30),
+                            ft.Container(
+                                content=ft.Text(
+                                    "Rate limiting uses randomized delays and adaptive backoff to avoid IEEE blocks.",
+                                    size=10, color=ft.Colors.GREY_500, italic=True,
+                                ),
+                                padding=ft.padding.only(top=10),
+                            ),
                         ], spacing=5),
                         padding=24,
                     ),

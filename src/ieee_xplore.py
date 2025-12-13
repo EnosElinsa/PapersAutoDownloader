@@ -1,6 +1,9 @@
 import logging
+import random
 import re
 import time
+from collections import deque
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
@@ -17,6 +20,155 @@ from .state import append_state_record, load_downloaded_arnumbers
 from .database import PapersDatabase
 
 logger = logging.getLogger(__name__)
+
+
+class RateLimitManager:
+    """Manages request rate limiting with adaptive delays and hourly quotas."""
+    
+    def __init__(
+        self,
+        base_delay: float = 5.0,
+        min_delay: float = 3.0,
+        max_delay: float = 60.0,
+        hourly_quota: int = 100,
+        randomize_factor: float = 0.5,
+    ):
+        self.base_delay = base_delay
+        self.min_delay = min_delay
+        self.max_delay = max_delay
+        self.hourly_quota = hourly_quota
+        self.randomize_factor = randomize_factor
+        
+        # Adaptive delay state
+        self.current_delay = base_delay
+        self.consecutive_successes = 0
+        self.consecutive_failures = 0
+        
+        # Hourly quota tracking
+        self.request_timestamps: deque = deque()
+        
+        # Statistics
+        self.total_requests = 0
+        self.total_rate_limits = 0
+    
+    def get_delay(self) -> float:
+        """Get the next delay with randomization."""
+        # Add random jitter (±randomize_factor of current delay)
+        jitter = self.current_delay * self.randomize_factor
+        delay = self.current_delay + random.uniform(-jitter, jitter)
+        return max(self.min_delay, min(self.max_delay, delay))
+    
+    def record_success(self, response_time: float = 0) -> None:
+        """Record a successful request and potentially decrease delay."""
+        self.consecutive_successes += 1
+        self.consecutive_failures = 0
+        self.total_requests += 1
+        self._record_request()
+        
+        # Gradually decrease delay after consecutive successes
+        if self.consecutive_successes >= 3:
+            self.current_delay = max(self.min_delay, self.current_delay * 0.9)
+            self.consecutive_successes = 0
+            logger.debug(f"Decreased delay to {self.current_delay:.1f}s after successes")
+    
+    def record_failure(self, is_rate_limit: bool = False) -> None:
+        """Record a failed request and increase delay."""
+        self.consecutive_failures += 1
+        self.consecutive_successes = 0
+        self.total_requests += 1
+        self._record_request()
+        
+        if is_rate_limit:
+            self.total_rate_limits += 1
+            # Significant increase for rate limits
+            self.current_delay = min(self.max_delay, self.current_delay * 2.0)
+            logger.warning(f"Rate limit hit! Increased delay to {self.current_delay:.1f}s")
+        else:
+            # Moderate increase for other failures
+            self.current_delay = min(self.max_delay, self.current_delay * 1.3)
+            logger.debug(f"Increased delay to {self.current_delay:.1f}s after failure")
+    
+    def _record_request(self) -> None:
+        """Record request timestamp for quota tracking."""
+        now = datetime.now()
+        self.request_timestamps.append(now)
+        
+        # Remove timestamps older than 1 hour
+        cutoff = now - timedelta(hours=1)
+        while self.request_timestamps and self.request_timestamps[0] < cutoff:
+            self.request_timestamps.popleft()
+    
+    def get_requests_in_last_hour(self) -> int:
+        """Get number of requests in the last hour."""
+        now = datetime.now()
+        cutoff = now - timedelta(hours=1)
+        while self.request_timestamps and self.request_timestamps[0] < cutoff:
+            self.request_timestamps.popleft()
+        return len(self.request_timestamps)
+    
+    def check_quota(self) -> Tuple[bool, int]:
+        """Check if we're within hourly quota. Returns (can_proceed, wait_seconds)."""
+        requests_in_hour = self.get_requests_in_last_hour()
+        
+        if requests_in_hour < self.hourly_quota:
+            return True, 0
+        
+        # Calculate how long to wait until oldest request expires
+        if self.request_timestamps:
+            oldest = self.request_timestamps[0]
+            wait_until = oldest + timedelta(hours=1)
+            wait_seconds = max(0, (wait_until - datetime.now()).total_seconds())
+            return False, int(wait_seconds) + 1
+        
+        return True, 0
+    
+    def wait_for_quota(self, stop_check: Optional[callable] = None) -> bool:
+        """Wait until quota is available. Returns False if stopped."""
+        can_proceed, wait_seconds = self.check_quota()
+        
+        if can_proceed:
+            return True
+        
+        logger.warning(f"Hourly quota ({self.hourly_quota}) reached. Waiting {wait_seconds}s...")
+        print(f"[!] Hourly quota reached ({self.get_requests_in_last_hour()}/{self.hourly_quota}). "
+              f"Waiting {wait_seconds // 60}m {wait_seconds % 60}s...")
+        
+        # Wait in small increments to allow stop checking
+        waited = 0
+        while waited < wait_seconds:
+            if stop_check and stop_check():
+                return False
+            time.sleep(min(5, wait_seconds - waited))
+            waited += 5
+        
+        return True
+    
+    def smart_sleep(self, stop_check: Optional[callable] = None) -> bool:
+        """Sleep with randomized delay. Returns False if stopped."""
+        delay = self.get_delay()
+        logger.debug(f"Sleeping {delay:.1f}s before next request")
+        
+        # Sleep in small increments to allow stop checking
+        slept = 0
+        while slept < delay:
+            if stop_check and stop_check():
+                return False
+            sleep_chunk = min(0.5, delay - slept)
+            time.sleep(sleep_chunk)
+            slept += sleep_chunk
+        
+        return True
+    
+    def get_stats(self) -> dict:
+        """Get rate limit statistics."""
+        return {
+            "total_requests": self.total_requests,
+            "total_rate_limits": self.total_rate_limits,
+            "requests_last_hour": self.get_requests_in_last_hour(),
+            "hourly_quota": self.hourly_quota,
+            "current_delay": round(self.current_delay, 1),
+            "rate_limit_percentage": round(self.total_rate_limits / max(1, self.total_requests) * 100, 1),
+        }
 
 
 _INVALID_FILENAME_CHARS = re.compile(r"[<>:\\/?*\"|]+")
@@ -55,6 +207,7 @@ class IeeeXploreDownloader:
         sleep_between_downloads_seconds: float,
         database: Optional[PapersDatabase] = None,
         stop_check: Optional[callable] = None,
+        hourly_quota: int = 100,
     ) -> None:
         self._driver = driver
         self._download_dir = download_dir
@@ -63,6 +216,15 @@ class IeeeXploreDownloader:
         self._sleep_between_downloads_seconds = sleep_between_downloads_seconds
         self._db = database
         self._stop_check = stop_check
+        
+        # Initialize rate limit manager
+        self._rate_limiter = RateLimitManager(
+            base_delay=sleep_between_downloads_seconds,
+            min_delay=max(3.0, sleep_between_downloads_seconds * 0.5),
+            max_delay=max(60.0, sleep_between_downloads_seconds * 10),
+            hourly_quota=hourly_quota,
+            randomize_factor=0.5,
+        )
 
     def manual_login(self) -> None:
         self._driver.get("https://ieeexplore.ieee.org/Xplore/home.jsp")
@@ -345,7 +507,11 @@ class IeeeXploreDownloader:
                     failed_count=failed_count,
                 )
 
-            time.sleep(self._sleep_between_downloads_seconds)
+            # Smart sleep with rate limiting
+            if not self._rate_limiter.wait_for_quota(self._stop_check):
+                break  # Stopped by user
+            if not self._rate_limiter.smart_sleep(self._stop_check):
+                break  # Stopped by user
 
         # Final task stats update
         if self._db and task_id:
@@ -360,48 +526,88 @@ class IeeeXploreDownloader:
         """Download PDF for a given arnumber with retry logic."""
         before_files = {p.name for p in self._download_dir.iterdir() if p.is_file()}
         last_error: Optional[Exception] = None
+        start_time = time.time()
         
         for attempt in range(1, max_retries + 1):
             try:
                 logger.debug(f"Download attempt {attempt}/{max_retries} for arnumber={arnumber}")
-                return self._try_download_pdf(arnumber, before_files)
+                result = self._try_download_pdf(arnumber, before_files)
+                
+                # Record success with response time
+                response_time = time.time() - start_time
+                self._rate_limiter.record_success(response_time)
+                return result
+                
             except PermissionError as e:
                 # No access - don't retry, just raise immediately
                 logger.warning(f"No access to arnumber={arnumber}")
+                self._rate_limiter.record_failure(is_rate_limit=False)
                 raise
             except RuntimeError as e:
                 error_msg = str(e).lower()
                 # Check if it's a rate limit (should retry) vs subscription issue (should not retry)
                 if "rate" in error_msg and "limit" in error_msg:
-                    # Definite rate limit - retry with backoff
-                    backoff_time = 30 * attempt  # 30s, 60s, 90s
-                    logger.warning(f"Rate limited on attempt {attempt}, waiting {backoff_time}s...")
-                    print(f"[!] IEEE rate limit detected, waiting {backoff_time}s before retry...")
-                    time.sleep(backoff_time)
+                    # Definite rate limit - retry with exponential backoff + jitter
+                    self._rate_limiter.record_failure(is_rate_limit=True)
+                    base_backoff = 30 * attempt
+                    jitter = random.uniform(0, 10)
+                    backoff_time = base_backoff + jitter
+                    logger.warning(f"Rate limited on attempt {attempt}, waiting {backoff_time:.0f}s...")
+                    print(f"[!] IEEE rate limit detected, waiting {backoff_time:.0f}s before retry...")
+                    
+                    # Interruptible sleep
+                    slept = 0
+                    while slept < backoff_time:
+                        if self._stop_check and self._stop_check():
+                            raise StopRequestedException("Stopped during rate limit backoff")
+                        time.sleep(min(1, backoff_time - slept))
+                        slept += 1
                     last_error = e
                 elif "subscription" in error_msg or "outside" in error_msg or "purchase" in error_msg:
                     # Subscription/access issue - don't retry, raise as PermissionError
                     logger.warning(f"No subscription access to arnumber={arnumber}")
+                    self._rate_limiter.record_failure(is_rate_limit=False)
                     raise PermissionError(f"No subscription access: {e}")
                 else:
+                    self._rate_limiter.record_failure(is_rate_limit=False)
                     raise
+            except StopRequestedException:
+                # User requested stop - don't retry, raise immediately
+                logger.info(f"Download stopped by user for arnumber={arnumber}")
+                raise
             except TimeoutError as e:
                 last_error = e
+                self._rate_limiter.record_failure(is_rate_limit=False)
                 logger.warning(f"Attempt {attempt} timed out for arnumber={arnumber}: {e}")
                 if attempt < max_retries:
+                    # Check stop before retry sleep
+                    if self._stop_check and self._stop_check():
+                        raise StopRequestedException("Stopped before retry")
                     time.sleep(2)
             except WebDriverException as e:
                 last_error = e
+                self._rate_limiter.record_failure(is_rate_limit=False)
                 logger.warning(f"WebDriver error on attempt {attempt} for arnumber={arnumber}: {e}")
                 if attempt < max_retries:
+                    # Check stop before retry sleep
+                    if self._stop_check and self._stop_check():
+                        raise StopRequestedException("Stopped before retry")
                     time.sleep(3)
             except Exception as e:
                 last_error = e
+                self._rate_limiter.record_failure(is_rate_limit=False)
                 logger.warning(f"Unexpected error on attempt {attempt} for arnumber={arnumber}: {e}")
                 if attempt < max_retries:
+                    # Check stop before retry sleep
+                    if self._stop_check and self._stop_check():
+                        raise StopRequestedException("Stopped before retry")
                     time.sleep(2)
         
         raise last_error or RuntimeError(f"Failed to download PDF for arnumber={arnumber}")
+    
+    def get_rate_limit_stats(self) -> dict:
+        """Get rate limiting statistics."""
+        return self._rate_limiter.get_stats()
 
     def _try_download_pdf(self, arnumber: str, before_files: Set[str]) -> Path:
         """Single attempt to download a PDF."""

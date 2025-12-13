@@ -741,6 +741,7 @@ class PaperDownloaderApp:
             except Exception:
                 sleep_between_downloads_seconds = 5.0
 
+            hourly_quota = int(self.settings.get("hourly_quota", 100))
             self.downloader = IeeeXploreDownloader(
                 driver=self.driver,
                 download_dir=self.download_dir,
@@ -749,6 +750,7 @@ class PaperDownloaderApp:
                 sleep_between_downloads_seconds=sleep_between_downloads_seconds,
                 database=self.db,
                 stop_check=lambda: self.stop_requested,
+                hourly_quota=hourly_quota,
             )
 
             if self.stop_requested:
@@ -756,7 +758,7 @@ class PaperDownloaderApp:
                 self._download_finished()
                 return
 
-            self._log_styled("Collecting papers from search results...", "info")
+            self._log_styled(f"Collecting papers (quota: {hourly_quota}/hr)...", "info")
             max_results = int(self.max_results.value or 25)
 
             if self.search_type.value == "url":
@@ -968,6 +970,7 @@ class PaperDownloaderApp:
                 except:
                     timeout = 300.0
 
+                hourly_quota = int(self.settings.get("hourly_quota", 100))
                 self.downloader = IeeeXploreDownloader(
                     driver=self.driver,
                     download_dir=self.download_dir,
@@ -976,6 +979,7 @@ class PaperDownloaderApp:
                     sleep_between_downloads_seconds=1,
                     database=self.db,
                     stop_check=lambda: self.stop_requested,
+                    hourly_quota=hourly_quota,
                 )
 
                 self.db.update_paper_status(arnumber, status="downloading")
@@ -1075,6 +1079,7 @@ class PaperDownloaderApp:
             except Exception:
                 sleep_between_downloads_seconds = 5.0
 
+            hourly_quota = int(self.settings.get("hourly_quota", 100))
             self.downloader = IeeeXploreDownloader(
                 driver=self.driver,
                 download_dir=self.download_dir,
@@ -1083,6 +1088,7 @@ class PaperDownloaderApp:
                 sleep_between_downloads_seconds=sleep_between_downloads_seconds,
                 database=self.db,
                 stop_check=lambda: self.stop_requested,
+                hourly_quota=hourly_quota,
             )
 
             downloaded_count = 0
