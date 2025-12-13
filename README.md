@@ -310,13 +310,28 @@ google-chrome --version
 ```
 src/
 ├── __init__.py
-├── __main__.py
-├── cli.py              # CLI 入口
-├── gui.py              # GUI 界面（Flet/Material Design 3）
-├── database.py         # SQLite 数据库管理
-├── ieee_xplore.py      # IEEE Xplore 自动化逻辑
-├── selenium_utils.py   # WebDriver 工具函数
-└── state.py            # 状态管理（旧版兼容）
+├── __main__.py          # 入口点（支持 --gui 和 CLI）
+├── cli.py               # CLI 命令行接口
+├── database.py          # SQLite 数据库管理
+├── ieee_xplore.py       # IEEE Xplore 自动化逻辑
+├── selenium_utils.py    # WebDriver 工具函数
+├── state.py             # 状态管理（旧版兼容）
+└── gui/                 # GUI 模块（Flet/Material Design 3）
+    ├── __init__.py      # 包导出
+    ├── app.py           # 主应用类
+    ├── theme.py         # 主题管理（深色/浅色模式）
+    ├── components/      # 可复用 UI 组件
+    │   └── widgets.py   # 统计卡片、标题栏等
+    ├── utils/           # 工具函数
+    │   └── helpers.py   # URL 处理、通知、文件操作
+    ├── views/           # 页面视图
+    │   ├── download_view.py   # 下载页面
+    │   ├── papers_view.py     # 论文库页面
+    │   ├── tasks_view.py      # 任务历史页面
+    │   └── settings_view.py   # 设置页面
+    └── dialogs/         # 对话框
+        ├── paper_dialogs.py   # 论文详情/编辑对话框
+        └── task_dialogs.py    # 任务详情/编辑对话框
 ```
 
 ## 法律声明
