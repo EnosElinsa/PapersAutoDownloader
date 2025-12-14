@@ -232,6 +232,11 @@ python -m src --help
 | `--retry-failed` | 重试下载失败的论文 |
 | `--migrate-jsonl` | 从旧版 JSONL 迁移到数据库 |
 | `--tasks` | 显示最近的下载任务 |
+| `--resume-task TASK_ID` | 恢复中断的任务 |
+| `--delete-paper ARNUMBER` | 从数据库删除指定论文 |
+| `--delete-task TASK_ID` | 删除任务及其关联的论文 |
+| `--delete-by-status STATUS` | 删除指定状态的所有论文（failed/pending/skipped） |
+| `--hourly-quota N` | 每小时最大下载数量（默认 100） |
 
 ## 输出文件
 

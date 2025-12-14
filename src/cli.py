@@ -48,7 +48,7 @@ Examples:
         """,
     )
 
-    search_group = p.add_mutually_exclusive_group(required=True)
+    search_group = p.add_mutually_exclusive_group(required=False)
     search_group.add_argument("--query", help="Search query keywords")
     search_group.add_argument("--search-url", help="IEEE Xplore search results URL (preserves your filters)")
     
@@ -86,8 +86,17 @@ Examples:
     p.add_argument("--retry-failed", action="store_true", help="Retry downloading failed papers")
     p.add_argument("--migrate-jsonl", action="store_true", help="Migrate data from JSONL to database")
     p.add_argument("--tasks", action="store_true", help="Show recent download tasks")
+    p.add_argument("--resume-task", type=int, metavar="TASK_ID", help="Resume an interrupted task")
+    p.add_argument("--delete-paper", metavar="ARNUMBER", help="Delete a paper from database")
+    p.add_argument("--delete-task", type=int, metavar="TASK_ID", help="Delete a task and its papers")
+    p.add_argument("--delete-by-status", choices=["failed", "pending", "skipped"], 
+                   help="Delete all papers with specified status")
+    
+    # Rate limiting options
+    p.add_argument("--hourly-quota", type=int, default=100, 
+                   help="Maximum downloads per hour (default: 100)")
 
-    return p.parse_args()
+    return p.parse_args()n p.parse_args()
 
 
 def _handle_db_commands(args: argparse.Namespace, db: PapersDatabase, download_dir: Path) -> bool:
@@ -149,10 +158,42 @@ def _handle_db_commands(args: argparse.Namespace, db: PapersDatabase, download_d
         tasks = db.get_recent_tasks(limit=10)
         print("\n=== Recent Download Tasks ===")
         for t in tasks:
-            status_icon = "✓" if t["status"] == "completed" else "○"
-            query = t["query"] or t["search_url"][:50] + "..." if t["search_url"] else "N/A"
-            print(f"  [{status_icon}] Task #{t['id']}: {query}")
-            print(f"      Downloaded: {t['downloaded_count']}, Skipped: {t['skipped_count']}, Failed: {t['failed_count']}")
+            status_icon = {"completed": "✓", "interrupted": "○", "running": "►", "error": "✗"}.get(t["status"], "?")
+            query = t["query"] or (t["search_url"][:50] + "..." if t["search_url"] else "N/A")
+            print(f"  [{status_icon}] Task #{t['id']} ({t['status']}): {query}")
+            print(f"      Downloaded: {t['downloaded_count']}, Skipped: {t['skipped_count']}, Failed: {t['failed_count']}, Total: {t['total_found'] or 0}")
+        return True
+    
+    if args.delete_paper:
+        paper = db.get_paper(args.delete_paper)
+        if not paper:
+            print(f"[!] Paper {args.delete_paper} not found")
+            return True
+        db._conn.execute("DELETE FROM papers WHERE arnumber = ?", (args.delete_paper,))
+        db._conn.commit()
+        print(f"[+] Deleted paper {args.delete_paper}: {paper['title'][:50]}...")
+        return True
+    
+    if args.delete_task:
+        task = db.get_task(args.delete_task)
+        if not task:
+            print(f"[!] Task #{args.delete_task} not found")
+            return True
+        db.delete_task(args.delete_task)
+        print(f"[+] Deleted task #{args.delete_task} and its papers")
+        return True
+    
+    if args.delete_by_status:
+        papers = db.get_papers_by_status(args.delete_by_status)
+        if not papers:
+            print(f"[*] No {args.delete_by_status} papers to delete")
+            return True
+        count = 0
+        for p in papers:
+            db._conn.execute("DELETE FROM papers WHERE arnumber = ?", (p["arnumber"],))
+            count += 1
+        db._conn.commit()
+        print(f"[+] Deleted {count} {args.delete_by_status} papers")
         return True
     
     return False
@@ -176,6 +217,13 @@ def main() -> None:
 
     # Handle database-only commands (no browser needed)
     if _handle_db_commands(args, db, download_dir):
+        db.close()
+        return
+
+    # Validate that we have something to do
+    if not any([args.query, args.search_url, args.retry_failed, args.resume_task]):
+        print("[!] Please specify --query, --search-url, --retry-failed, or --resume-task")
+        print("    Use --help for more options")
         db.close()
         return
 
@@ -224,7 +272,9 @@ def main() -> None:
             per_download_timeout_seconds=args.per_download_timeout,
             sleep_between_downloads_seconds=args.sleep_between,
             database=db,
+            hourly_quota=args.hourly_quota,
         )
+        print(f"[*] Rate limiting: {args.hourly_quota} downloads/hour")
 
         # Login (skip if connecting to existing browser - assume already logged in)
         if args.debugger_address:
@@ -241,8 +291,39 @@ def main() -> None:
             downloader.manual_login()
             print("[+] Login successful!")
 
+        # Handle resume task mode
+        if args.resume_task:
+            task = db.get_task(args.resume_task)
+            if not task:
+                print(f"[!] Task #{args.resume_task} not found")
+                return
+            if task["status"] not in ("interrupted", "error", "running"):
+                print(f"[!] Task #{args.resume_task} is {task['status']}, cannot resume")
+                return
+            
+            print(f"[*] Resuming Task #{args.resume_task}...")
+            db.resume_task(args.resume_task)
+            task_id = args.resume_task
+            
+            # Get pending papers for this task
+            pending_papers = db.get_papers_by_status("pending", task_id=task_id)
+            failed_papers = db.get_papers_by_status("failed", task_id=task_id)
+            
+            # Reset failed to pending for retry
+            for p in failed_papers:
+                db.update_paper_status(p["arnumber"], "pending")
+            
+            papers = [{"arnumber": p["arnumber"], "title": p["title"]} for p in pending_papers + failed_papers]
+            
+            if not papers:
+                print("[*] No pending papers to download in this task")
+                db.complete_task(task_id, status="completed")
+                return
+            
+            print(f"[+] Found {len(papers)} papers to resume")
+        
         # Handle retry-failed mode
-        if args.retry_failed:
+        elif args.retry_failed:
             failed_papers = db.get_failed_papers()
             if not failed_papers:
                 print("[*] No failed papers to retry.")
@@ -253,7 +334,7 @@ def main() -> None:
             # Reset status to pending for retry
             for p in failed_papers:
                 db.update_paper_status(p["arnumber"], "pending")
-        else:
+        elif args.query or args.search_url:
             # Collect papers
             print("[*] Collecting papers from search results...")
             if args.search_url:
@@ -275,6 +356,10 @@ def main() -> None:
                 )
                 if len(papers) >= 50:
                     task_id = db.create_task(query=args.query, max_results=args.max_results)
+        else:
+            # Should not reach here due to validation above
+            print("[!] No action specified")
+            return
 
         if task_id is not None:
             print(f"[+] Found {len(papers)} papers to download (Task #{task_id})")
